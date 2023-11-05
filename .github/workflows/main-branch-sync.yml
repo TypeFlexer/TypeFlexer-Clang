@@ -56,14 +56,14 @@ jobs:
 
       - name: Fetch and Extract SPEC CPU2006
         env:
-          SPEC2006_TAR_URL: https://github.com/TypeFlexer/TypeFlexer-Clang/releases/download/v1.0.0/specbenchmarks.tar.gz
+          SPEC2006_TAR_URL: https://github.com/TypeFlexer/TypeFlexer-Clang/releases/download/v1.0.0/specbenchmark.tar.gz
         run: |
           curl -L -o specbenchmarks.zip $SPEC2006_TAR_URL
           mkdir -p specbenchmarks
-          mv specbenchmarks.zip specbenchmarks/
+          mv specbenchmark.tar.gz specbenchmarks/
           cd specbenchmarks
-          tar -xvzf specbenchmarks.zip
-          cd specbenchmarks
+          tar -xvzf specbenchmark.tar.gz
+          cd specbenchmark
           pwd
           . ./shrc
           export LD_LIBRARY_PATH=benchspec/CPU2006/HoardLib/:$LD_LIBRARY_PATH
