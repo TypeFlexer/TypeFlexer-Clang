@@ -71,13 +71,13 @@ jobs:
           export LD_LIBRARY_PATH=$SPEC_CONFIG_DIR/../benchspec/CPU2006/HoardLib/:$LD_LIBRARY_PATH
           for test in lbm libquantum h264ref bzip2 sjeng milc sphinx3; do
             echo "Running SPEC CPU2006 test for $test"
-            runspec --config=heapmytest.cfg --size=ref --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
+            runspec --config=heapmytest.cfg --size=test --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
             if ! grep -q "Build successes:" "spec_test_output_$test.txt"; then
           echo "[HEAP SBX] Error: Build did not succeed for $test."
             exit 1
             fi
           if ! grep -Eq "Success: [0-9]+x[0-9]+\.$test" "spec_test_output_$test.txt"; then
-                                    echo "Error: SPEC CPU2006 test did not pass for $test."
+                                    echo "[HEAP SBX] Error: SPEC CPU2006 test did not pass for $test."
                                     exit 1
             fi
             echo "[HEAP SBX] SPEC CPU2006 test passed successfully for $test."
@@ -85,14 +85,50 @@ jobs:
           
           for test in lbm libquantum h264ref bzip2 sjeng milc sphinx3; do
             echo "Running SPEC CPU2006 test for $test"
-            runspec --config=wasmmytest.cfg --size=ref --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
+            runspec --config=wasmmytest.cfg --size=test --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
             if ! grep -q "Build successes:" "spec_test_output_$test.txt"; then
             echo "[WASM SBX] Error: Build did not succeed for $test."
               exit 1
               fi
             if ! grep -Eq "Success: [0-9]+x[0-9]+\.$test" "spec_test_output_$test.txt"; then
-                                      echo "Error: SPEC CPU2006 test did not pass for $test."
+                                      echo "[WASM SBX] Error: SPEC CPU2006 test did not pass for $test."
                                       exit 1
             fi
             echo "[WASM SBX] SPEC CPU2006 test passed successfully for $test."
           done
+          
+          echo "[WASM CODE] Running SPEC CPU2006 test for h264ref"
+          runspec --config=wasmcodetest_H26.cfg --size=test --noreportable --tune=base --iterations=1 h264ref | tee "spec_test_output_h264ref_code.txt"
+          if ! grep -q "Build successes:" "spec_test_output_h264ref_code.txt"; then
+          echo "[WASM CODE] Error: Build did not succeed for h264ref."
+            exit 1
+            fi
+          if ! grep -Eq "Success: [0-9]+x[0-9]+\.h264ref" "spec_test_output_h264ref_code.txt"; then
+                                    echo "[WASM CODE] Error: SPEC CPU2006 test did not pass for h264ref."
+                                    exit 1
+          fi
+          echo "[WASM CODE] SPEC CPU2006 test passed successfully for h264ref."
+          
+          echo "[WASM CODE] Running SPEC CPU2006 test for lbm"
+          runspec --config=wasmcodetest_LBM.cfg --size=test --noreportable --tune=base --iterations=1 lbm | tee "spec_test_output_lbm_code.txt"
+          if ! grep -q "Build successes:" "spec_test_output_lbm_code.txt"; then
+          echo "[WASM CODE] Error: Build did not succeed for lbm."
+            exit 1
+            fi
+          if ! grep -Eq "Success: [0-9]+x[0-9]+\.lbm" "spec_test_output_lbm_code.txt"; then
+                                    echo "[WASM CODE] Error: SPEC CPU2006 test did not pass for lbm."
+                                    exit 1
+          fi
+          echo "[WASM CODE] SPEC CPU2006 test passed successfully for lbm."
+          
+          echo "[WASM CODE] Running SPEC CPU2006 test for libquantum"
+          runspec --config=wasmcodetest_LIBQ.cfg --size=test --noreportable --tune=base --iterations=1 libquantum | tee "spec_test_output_libquantum_code.txt"
+          if ! grep -q "Build successes:" "spec_test_output_libquantum_code.txt"; then
+          echo "[WASM CODE] Error: Build did not succeed for libquantum."
+            exit 1
+            fi
+          if ! grep -Eq "Success: [0-9]+x[0-9]+\.libquantum" "spec_test_output_libquantum_code.txt"; then
+                                    echo "[WASM CODE] Error: SPEC CPU2006 test did not pass for libquantum."
+                                    exit 1
+          fi
+          echo "[WASM CODE] SPEC CPU2006 test passed successfully for libquantum."
