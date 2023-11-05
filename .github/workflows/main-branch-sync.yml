@@ -53,3 +53,51 @@ jobs:
             echo "Error: Expected 15 passed tests, but got $passed_tests"
             exit 1
           fi
+
+      - name: Fetch and Extract SPEC CPU2006
+        env:
+          SPEC2006_TAR_URL: https://github.com/TypeFlexer/TypeFlexer-Clang/releases/tag/v1.0.0/specbenchmarks.zip
+        run: |
+          curl -L -o specbenchmarks.zip $SPEC2006_TAR_URL
+          mkdir -p specbenchmarks
+          mv specbenchmarks.zip specbenchmarks/
+          cd specbenchmarks
+          unzip specbenchmarks.zip
+
+      - name: Source shrc and Export Library Path
+        run: |
+          . ./shrc
+          export LD_LIBRARY_PATH=benchspec/CPU2006/HoardLib/:$LD_LIBRARY_PATH
+          cd config
+
+      - name: Run SPEC CPU2006 Tests for Multiple Benchmarks [Heap SBX]
+        run: |
+          for test in lbm libquantum h264ref bzip2 sjeng milc sphinx3; do
+            echo "Running SPEC CPU2006 test for $test"
+            runspec --config=heapmytest.cfg --size=ref --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
+            if ! grep -q "Build successes:" "spec_test_output_$test.txt"; then
+              echo "[HEAP SBX] Error: Build did not succeed for $test."
+              exit 1
+            fi
+            if ! grep -Eq "Success: [0-9]+x${test}" "spec_test_output_$test.txt"; then
+                                      echo "Error: SPEC CPU2006 test did not pass for $test."
+                                      exit 1
+            fi
+            echo "[HEAP SBX] SPEC CPU2006 test passed successfully for $test."
+          done
+
+      - name: Run SPEC CPU2006 Tests for Multiple Benchmarks [WASM SBX]
+        run: |
+          for test in lbm libquantum h264ref bzip2 sjeng milc sphinx3; do
+            echo "Running SPEC CPU2006 test for $test"
+            runspec --config=wasmmytest.cfg --size=ref --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
+            if ! grep -q "Build successes:" "spec_test_output_$test.txt"; then
+              echo "[WASM SBX] Error: Build did not succeed for $test."
+              exit 1
+            fi
+            if ! grep -Eq "Success: [0-9]+x${test}" "spec_test_output_$test.txt"; then
+                                      echo "Error: SPEC CPU2006 test did not pass for $test."
+                                      exit 1
+            fi
+            echo "[WASM SBX] SPEC CPU2006 test passed successfully for $test."
+          done
