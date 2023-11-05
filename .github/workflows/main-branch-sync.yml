@@ -58,7 +58,7 @@ jobs:
         env:
           SPEC2006_TAR_URL: https://github.com/TypeFlexer/TypeFlexer-Clang/releases/download/v1.0.0/specbenchmark.tar.gz
         run: |
-          curl -L -o specbenchmarks.zip $SPEC2006_TAR_URL
+          curl -L -o specbenchmark.zip $SPEC2006_TAR_URL
           mkdir -p specbenchmarks
           mv specbenchmark.tar.gz specbenchmarks/
           cd specbenchmarks
