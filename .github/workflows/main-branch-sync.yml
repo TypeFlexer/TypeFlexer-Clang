@@ -73,12 +73,12 @@ jobs:
             echo "Running SPEC CPU2006 test for $test"
             runspec --config=heapmytest.cfg --size=ref --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
             if ! grep -q "Build successes:" "spec_test_output_$test.txt"; then
-              echo "[HEAP SBX] Error: Build did not succeed for $test."
-              exit 1
+          echo "[HEAP SBX] Error: Build did not succeed for $test."
+            exit 1
             fi
-            if ! grep -Eq "Success: [0-9]+x${test}" "spec_test_output_$test.txt"; then
-                                      echo "Error: SPEC CPU2006 test did not pass for $test."
-                                      exit 1
+          if ! grep -Eq "Success: [0-9]+x[0-9]+\.$test" "spec_test_output_$test.txt"; then
+                                    echo "Error: SPEC CPU2006 test did not pass for $test."
+                                    exit 1
             fi
             echo "[HEAP SBX] SPEC CPU2006 test passed successfully for $test."
           done
@@ -87,10 +87,10 @@ jobs:
             echo "Running SPEC CPU2006 test for $test"
             runspec --config=wasmmytest.cfg --size=ref --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
             if ! grep -q "Build successes:" "spec_test_output_$test.txt"; then
-              echo "[WASM SBX] Error: Build did not succeed for $test."
+            echo "[WASM SBX] Error: Build did not succeed for $test."
               exit 1
-            fi
-            if ! grep -Eq "Success: [0-9]+x${test}" "spec_test_output_$test.txt"; then
+              fi
+            if ! grep -Eq "Success: [0-9]+x[0-9]+\.$test" "spec_test_output_$test.txt"; then
                                       echo "Error: SPEC CPU2006 test did not pass for $test."
                                       exit 1
             fi
