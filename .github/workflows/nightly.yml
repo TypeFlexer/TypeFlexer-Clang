@@ -1,0 +1,134 @@
+name: Typeflexer Tests
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup build directory and Compile 3c target
+        env:
+          TMPDIR: /home/arun/tmp
+        run: |
+          mkdir -p llvm/build
+          cd llvm/build
+          mkdir -p $TMPDIR
+          cmake -G Ninja -DLLVM_ENABLE_PROJECTS=clang -DCMAKE_LINKER=/usr/bin/gold -DCMAKE_BUILD_TYPE=Debug -DLLVM_LIT_ARGS=-v -DLLVM_PARALLEL_LINK_JOBS=1 ../
+          ninja clang
+          ninja llvm-size
+          ninja llvm-ar # If you meant the 'ar' utility from LLVM
+          ninja checkcbox-headers # for the typeflexer headers
+          echo "$PWD/bin" >> $GITHUB_PATH
+
+      - name: Install llvm-lit
+        run: |
+          pip install lit
+
+      - name: Compile and run Olden and Ptrdist tests
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/olden_ptrdist
+          cd $GITHUB_WORKSPACE/olden_ptrdist
+          git clone https://github.com/TypeFlexer/typeflexer-ptrdistOlden.git
+          cd typeflexer-ptrdistOlden
+          mkdir tests-build
+          cd tests-build
+          cmake -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=g++ -C../cmake/caches/Debug.cmake ../
+          make
+
+      - name: Run llvm-lit and generate results
+        run: |
+          cd $GITHUB_WORKSPACE/olden_ptrdist/typeflexer-ptrdistOlden/tests-build
+          llvm-lit -v -j 12 -o results.json .
+
+      - name: Check for 16 passed tests
+        run: |
+          cd $GITHUB_WORKSPACE/olden_ptrdist/typeflexer-ptrdistOlden/tests-build
+          passed_tests=$(jq '.tests[] | select(.code == "PASS") | .code' results.json | wc -l)
+          if [ "$passed_tests" -ne 15 ]; then
+            echo "Error: Expected 15 passed tests, but got $passed_tests"
+            exit 1
+          fi
+
+      - name: Fetch and Extract SPEC CPU2006
+        env:
+          SPEC2006_TAR_URL: https://github.com/TypeFlexer/TypeFlexer-Clang/releases/download/v1.0.0/specbenchmark.tar.gz
+        run: |
+          curl -L -o specbenchmark.tar.gz $SPEC2006_TAR_URL
+          mkdir -p specbenchmarks
+          mv specbenchmark.tar.gz specbenchmarks/
+          cd specbenchmarks
+          tar -xvzf specbenchmark.tar.gz
+          ls
+          pwd
+          . ./shrc
+          cd config
+          export SPEC_CONFIG_DIR=$(pwd)
+          export LD_LIBRARY_PATH=$SPEC_CONFIG_DIR/../benchspec/CPU2006/HoardLib/:$LD_LIBRARY_PATH
+          for test in lbm libquantum h264ref bzip2 sjeng milc sphinx3; do
+            echo "Running SPEC CPU2006 test for $test"
+            runspec --config=heapmytest.cfg --size=ref --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
+            if ! grep -q "Build successes:" "spec_test_output_$test.txt"; then
+          echo "[HEAP SBX] Error: Build did not succeed for $test."
+            exit 1
+            fi
+          if ! grep -Eq "Success: [0-9]+x[0-9]+\.$test" "spec_test_output_$test.txt"; then
+                                    echo "[HEAP SBX] Error: SPEC CPU2006 test did not pass for $test."
+                                    exit 1
+            fi
+            echo "[HEAP SBX] SPEC CPU2006 test passed successfully for $test."
+          done
+          
+          for test in lbm libquantum h264ref bzip2 sjeng milc sphinx3; do
+            echo "Running SPEC CPU2006 test for $test"
+            runspec --config=wasmmytest.cfg --size=ref --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
+            if ! grep -q "Build successes:" "spec_test_output_$test.txt"; then
+            echo "[WASM SBX] Error: Build did not succeed for $test."
+              exit 1
+              fi
+            if ! grep -Eq "Success: [0-9]+x[0-9]+\.$test" "spec_test_output_$test.txt"; then
+                                      echo "[WASM SBX] Error: SPEC CPU2006 test did not pass for $test."
+                                      exit 1
+            fi
+            echo "[WASM SBX] SPEC CPU2006 test passed successfully for $test."
+          done
+          
+          echo "[WASM CODE] Running SPEC CPU2006 test for h264ref"
+          runspec --config=wasmcodetest_H26.cfg --size=ref --noreportable --tune=base --iterations=1 h264ref | tee "spec_test_output_h264ref_code.txt"
+          if ! grep -q "Build successes:" "spec_test_output_h264ref_code.txt"; then
+          echo "[WASM CODE] Error: Build did not succeed for h264ref."
+            exit 1
+            fi
+          if ! grep -Eq "Success: [0-9]+x[0-9]+\.h264ref" "spec_test_output_h264ref_code.txt"; then
+                                    echo "[WASM CODE] Error: SPEC CPU2006 test did not pass for h264ref."
+                                    exit 1
+          fi
+          echo "[WASM CODE] SPEC CPU2006 test passed successfully for h264ref."
+          
+          echo "[WASM CODE] Running SPEC CPU2006 test for lbm"
+          runspec --config=wasmcodetest_LBM.cfg --size=ref --noreportable --tune=base --iterations=1 lbm | tee "spec_test_output_lbm_code.txt"
+          if ! grep -q "Build successes:" "spec_test_output_lbm_code.txt"; then
+          echo "[WASM CODE] Error: Build did not succeed for lbm."
+            exit 1
+            fi
+          if ! grep -Eq "Success: [0-9]+x[0-9]+\.lbm" "spec_test_output_lbm_code.txt"; then
+                                    echo "[WASM CODE] Error: SPEC CPU2006 test did not pass for lbm."
+                                    exit 1
+          fi
+          echo "[WASM CODE] SPEC CPU2006 test passed successfully for lbm."
+          
+          echo "[WASM CODE] Running SPEC CPU2006 test for libquantum"
+          runspec --config=wasmcodetest_LIBQ.cfg --size=ref --noreportable --tune=base --iterations=1 libquantum | tee "spec_test_output_libquantum_code.txt"
+          if ! grep -q "Build successes:" "spec_test_output_libquantum_code.txt"; then
+          echo "[WASM CODE] Error: Build did not succeed for libquantum."
+            exit 1
+            fi
+          if ! grep -Eq "Success: [0-9]+x[0-9]+\.libquantum" "spec_test_output_libquantum_code.txt"; then
+                                    echo "[WASM CODE] Error: SPEC CPU2006 test did not pass for libquantum."
+                                    exit 1
+          fi
+          echo "[WASM CODE] SPEC CPU2006 test passed successfully for libquantum."
