@@ -11,6 +11,7 @@
 [![Issues][issues-shield]][issues-url]
 [![LinkedIn][linkedin-shield]][linkedin-url]
 [![Typeflexer Tests](https://github.com/TypeFlexer/TypeFlexer-Clang/actions/workflows/main-branch-sync.yml/badge.svg)](https://github.com/TypeFlexer/TypeFlexer-Clang/actions/workflows/main-branch-sync.yml)
+[![Nightly Typeflexer Tests](https://github.com/TypeFlexer/TypeFlexer-Clang/actions/workflows/nightly.yml/badge.svg)](https://github.com/TypeFlexer/TypeFlexer-Clang/actions/workflows/nightly.yml)
 <p align="center">
   <img src="./images/CheckBox.gif" alt="animated" />
 </p>
