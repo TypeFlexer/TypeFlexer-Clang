@@ -1,4 +1,4 @@
-name: [Nightly] Typeflexer Tests
+name: Nightly Typeflexer Tests
 
 on:
   workflow_dispatch:
