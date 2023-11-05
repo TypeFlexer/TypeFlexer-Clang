@@ -68,11 +68,6 @@ jobs:
           . ./shrc
           export LD_LIBRARY_PATH=benchspec/CPU2006/HoardLib/:$LD_LIBRARY_PATH
           cd config
-          pwd
-
-      - name: Run SPEC CPU2006 Tests for Multiple Benchmarks [Heap SBX]
-        run: |
-          pwd
           for test in lbm libquantum h264ref bzip2 sjeng milc sphinx3; do
             echo "Running SPEC CPU2006 test for $test"
             runspec --config=heapmytest.cfg --size=ref --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
@@ -86,9 +81,7 @@ jobs:
             fi
             echo "[HEAP SBX] SPEC CPU2006 test passed successfully for $test."
           done
-
-      - name: Run SPEC CPU2006 Tests for Multiple Benchmarks [WASM SBX]
-        run: |
+          
           for test in lbm libquantum h264ref bzip2 sjeng milc sphinx3; do
             echo "Running SPEC CPU2006 test for $test"
             runspec --config=wasmmytest.cfg --size=ref --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
