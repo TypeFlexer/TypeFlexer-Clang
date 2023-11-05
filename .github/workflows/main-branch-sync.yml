@@ -63,7 +63,7 @@ jobs:
           mv specbenchmark.tar.gz specbenchmarks/
           cd specbenchmarks
           tar -xvzf specbenchmark.tar.gz
-          cd specbenchmark
+          ls
           pwd
           . ./shrc
           export LD_LIBRARY_PATH=benchspec/CPU2006/HoardLib/:$LD_LIBRARY_PATH
