@@ -66,9 +66,9 @@ jobs:
           ls
           pwd
           . ./shrc
-          export LD_LIBRARY_PATH=benchspec/CPU2006/HoardLib/:$LD_LIBRARY_PATH
           cd config
           export SPEC_CONFIG_DIR=$(pwd)
+          export LD_LIBRARY_PATH=$SPEC_CONFIG_DIR/../benchspec/CPU2006/HoardLib/:$LD_LIBRARY_PATH
           for test in lbm libquantum h264ref bzip2 sjeng milc sphinx3; do
             echo "Running SPEC CPU2006 test for $test"
             runspec --config=heapmytest.cfg --size=ref --noreportable --tune=base --iterations=1 $test | tee "spec_test_output_$test.txt"
