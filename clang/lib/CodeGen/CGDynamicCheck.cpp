@@ -115,7 +115,7 @@ void CodeGenFunction::EmitDynamicNonNullCheck(const Address BaseAddr,
   ++NumDynamicChecksNonNull;
 
   Value *ConditionVal = Builder.CreateIsNotNull(BaseAddr.getPointer(),
-                                                "_Dynamic_check.non_null");
+                                                "IsoHeap.non_null");
   EmitDynamicCheckBlocks(ConditionVal);
 }
 
@@ -212,7 +212,7 @@ void CodeGenFunction::EmitDynamicNonNullCheck(Value *Val,
   ++NumDynamicChecksNonNull;
 
   Value *ConditionVal = Builder.CreateIsNotNull(Val,
-                                                "_Dynamic_check.non_null");
+                                                "IsoHeap.non_null");
   EmitDynamicCheckBlocks(ConditionVal);
 }
 
@@ -322,26 +322,26 @@ void CodeGenFunction::EmitDynamicBoundsCheck(const Address PtrAddr,
 
   // Make the lower check
   Value *LowerChk = Builder.CreateICmpULE(
-      TaintedLowerPtrFromOffset, TaintedPtrFromOffset, "_Dynamic_check.lower");
+      TaintedLowerPtrFromOffset, TaintedPtrFromOffset, "IsoHeap.lower");
 
   // Make the upper check
   Value *UpperChk;
   assert(CheckKind != BCK_None);
   if (CheckKind != BCK_NullTermRead)
     UpperChk = Builder.CreateICmpULT(TaintedPtrFromOffset, TaintedUpperPtrFromOffset,
-                                     "_Dynamic_check.upper");
+                                     "IsoHeap.upper");
   else
     // For reads of null-terminated pointers, we allow the element exactly
     // at the upper bound to be read.
     UpperChk = Builder.CreateICmpULE(TaintedPtrFromOffset, TaintedUpperPtrFromOffset,
-                                     "_Dynamic_check.upper");
+                                     "IsoHeap.upper");
   llvm::Value *Condition =
-    Builder.CreateAnd(LowerChk, UpperChk, "_Dynamic_check.range");
+    Builder.CreateAnd(LowerChk, UpperChk, "IsoHeap.range");
   if (const ConstantInt *ConditionConstant = dyn_cast<ConstantInt>(Condition)) {
     if (ConditionConstant->isOne())
       return;
   }
-  BasicBlock *DyCkSuccess = createBasicBlock("_Dynamic_check.succeeded");
+  BasicBlock *DyCkSuccess = createBasicBlock("TaintCheck.succeeded");
   BasicBlock *DyCkFailure;
   if (CheckKind == BCK_NullTermWriteAssign)
     DyCkFailure = EmitNulltermWriteAdditionalCheck(Address(TaintedPtrFromOffset, getPointerAlign()) ,
@@ -401,7 +401,7 @@ CodeGenFunction::EmitDynamicBoundsCastCheck(const Address BaseAddr,
   //   trap()
 
   Value *IsNull =
-      Builder.CreateIsNull(BaseAddr.getPointer(), "_Dynamic_check.is_null");
+      Builder.CreateIsNull(BaseAddr.getPointer(), "IsoHeap.is_null");
 
   // Constant Folding:
   // If IsNull is true (one), then we don't need to insert the rest
@@ -427,8 +427,8 @@ CodeGenFunction::EmitDynamicBoundsCastCheck(const Address BaseAddr,
     }
   }
 
-  BasicBlock *DyCkSubsumption = createBasicBlock("_Dynamic_check.subsumption");
-  BasicBlock *DyCkSuccess = createBasicBlock("_Dynamic_check.success");
+  BasicBlock *DyCkSubsumption = createBasicBlock("IsoHeap.subsumption");
+  BasicBlock *DyCkSuccess = createBasicBlock("IsoHeap.success");
 
   // Insert the IsNull Branch
   Builder.CreateCondBr(IsNull, DyCkSuccess, DyCkSubsumption);
@@ -473,7 +473,7 @@ CodeGenFunction::EmitDynamicBoundsCastCheck(const Address BaseAddr,
 
   // Make the lower check (Lower <= CastLower)
   Value *LowerChk = Builder.CreateICmpULE(
-      TaintedPtrFromOffsetLower, TaintedPtrFromOffsetCastLower, "_Dynamic_check.lower");
+      TaintedPtrFromOffsetLower, TaintedPtrFromOffsetCastLower, "IsoHeap.lower");
 
   llvm::Value *TaintedPtrFromOffsetCastUpper = CastUpper.getPointer();
   TaintedPtrFromOffsetCastUpper = EmitConditionalTaintedP2OAdaptor(TaintedPtrFromOffsetCastUpper);
@@ -488,11 +488,11 @@ CodeGenFunction::EmitDynamicBoundsCastCheck(const Address BaseAddr,
 
   // Make the upper check (CastUpper <= Upper)
   Value *UpperChk = Builder.CreateICmpULE(
-      TaintedPtrFromOffsetCastUpper, TaintedPtrFromOffsetUpper, "_Dynamic_check.upper");
+      TaintedPtrFromOffsetCastUpper, TaintedPtrFromOffsetUpper, "IsoHeap.upper");
 
   // Make Both Checks
   Value *CastCond =
-      Builder.CreateAnd(LowerChk, UpperChk, "_Dynamic_check.cast");
+      Builder.CreateAnd(LowerChk, UpperChk, "IsoHeap.cast");
 
   // Constant Folding:
   // If CastCond is true (one), then we need to insert a direct branch
@@ -557,7 +557,7 @@ void CodeGenFunction::EmitDynamicCheckBlocks(Value *Condition) {
 
   ++NumDynamicChecksInserted;
 
-  BasicBlock *DyCkSuccess = createBasicBlock("_Dynamic_check.succeeded");
+  BasicBlock *DyCkSuccess = createBasicBlock("TaintCheck.succeeded");
   BasicBlock *DyCkFail = EmitDynamicCheckFailedBlock();
 
   Builder.CreateCondBr(Condition, DyCkSuccess, DyCkFail);
@@ -571,7 +571,7 @@ void CodeGenFunction::EmitDynamicTaintedCacheCheckBlocks(Value *Condition, Value
          "May only dynamic check boolean conditions");
   ++NumDynamicChecksInserted;
 
-  BasicBlock *DyCkSuccess = createBasicBlock("_Tainted_Cache.HIT");
+  BasicBlock *DyCkSuccess = createBasicBlock("IsoHeap_HIT");
   BasicBlock *DyCkFail = EmitTaintedL1_CacheMissBlock(DyCkSuccess, PointerAsInt64);
 
   Builder.CreateCondBr(Condition, DyCkSuccess, DyCkFail);
@@ -643,8 +643,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr) {
       // Bitcast this to the type of the pointer
       PointerVal = OffsetValWithHeapAndOffset;
       ConditionVal =
-          Builder.CreateICmpULT(ValidTPtrOffset, SbxHeapRangeLoadedVal);
-
+          Builder.CreateICmpULT(ValidTPtrOffset, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
       EmitDynamicCheckBlocks(ConditionVal);
      }
 
@@ -689,11 +688,11 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr) {
          BaseAddr.getPointer(),
          llvm::Type::getInt64Ty(PointerVal->getContext()));
      auto UpperChk_1 = Builder.CreateICmpULE(PointerAsInt64, upperboundVal_1,
-                                      "_Dynamic_check.Cache_upper");
+                                      "IsoHeap.Cache_upper");
      auto LowerChk_1= Builder.CreateICmpUGE(PointerAsInt64, lowerboundVal_1,
-                                          "_Tainted_check.Cache_lower");
+                                          "IsoHeap.Cache_lower");
      llvm::Value *Condition_1 =
-         Builder.CreateAnd(LowerChk_1, UpperChk_1, "_Dynamic_check.cache_range_1");
+         Builder.CreateAnd(LowerChk_1, UpperChk_1, "IsoHeap.cache_range_1");
      EmitDynamicTaintedCacheCheckBlocks(Condition_1, PointerAsInt64);
      return BaseAddr.getPointer();
     }
@@ -703,7 +702,7 @@ BasicBlock *CodeGenFunction::EmitDynamicCheckFailedBlock() {
   BasicBlock *Begin = Builder.GetInsertBlock();
 
   // Add a "failed block", which will be inserted at the end of CurFn
-  BasicBlock *FailBlock = createBasicBlock("_Dynamic_check.failed", CurFn);
+  BasicBlock *FailBlock = createBasicBlock("TaintCheck.failed", CurFn);
   Builder.SetInsertPoint(FailBlock);
   if (getLangOpts().InjectVerifierCalls) {
     llvm::Module &module = CGM.getModule();
@@ -733,7 +732,7 @@ BasicBlock *CodeGenFunction::EmitTaintedL1_CacheMissBlock(BasicBlock * CacheHit,
   BasicBlock *Begin = Builder.GetInsertBlock();
 
   // Add a "failed block", which will be inserted at the end of CurFn
-  BasicBlock *FailBlock = createBasicBlock("_Tainted_Cache_L1.MISS", CurFn);
+  BasicBlock *FailBlock = createBasicBlock("IsoHeap_L1.MISS", CurFn);
   Builder.SetInsertPoint(FailBlock);
   BasicBlock *DyCkSuccess = createBasicBlock("_Tainted_Cache_L2.HIT");
   BasicBlock *DyCkFail = EmitTaintedL2_CacheMissBlock(DyCkSuccess, PointerAsInt64);
@@ -747,11 +746,11 @@ BasicBlock *CodeGenFunction::EmitTaintedL1_CacheMissBlock(BasicBlock * CacheHit,
       llvm::Type::getInt64Ty(PointerAsInt64->getContext()),
       upperbound_2, 8, false);
   auto UpperChk_2 = Builder.CreateICmpULE(PointerAsInt64, upperboundVal_2,
-                                          "_Dynamic_check.Cache_upper");
+                                          "IsoHeap.Cache_upper");
   auto LowerChk_2= Builder.CreateICmpUGE(PointerAsInt64, lowerboundVal_2,
-                                          "_Tainted_check.Cache_lower");
+                                          "IsoHeap.Cache_lower");
   llvm::Value *Condition_2 =
-      Builder.CreateAnd(LowerChk_2, UpperChk_2, "_Dynamic_check.cache_range_2");
+      Builder.CreateAnd(LowerChk_2, UpperChk_2, "IsoHeap.cache_range_2");
   Builder.CreateCondBr(Condition_2, DyCkSuccess, DyCkFail);
   // This ensures the success block comes directly after the branch
   EmitBlock(DyCkSuccess);
@@ -772,7 +771,7 @@ BasicBlock *CodeGenFunction::EmitTaintedL2_CacheMissBlock(BasicBlock * CacheHit,
   BasicBlock *Begin = Builder.GetInsertBlock();
 
   // Add a "failed block", which will be inserted at the end of CurFn
-  BasicBlock *FailBlock = createBasicBlock("_Tainted_Cache_L2.MISS", CurFn);
+  BasicBlock *FailBlock = createBasicBlock("IsoHeap_L2", CurFn);
   Builder.SetInsertPoint(FailBlock);
   Builder.CreateIsTaintedPtr(PointerAsInt64, "_Tainted_Cache_L1L2.Cache_update_and_check");
   //jump back to the cache hit block

@@ -84,6 +84,7 @@
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
+#include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 #include <algorithm>
 #include <utility>
 using namespace llvm;
@@ -370,14 +371,553 @@ bool LoopInvariantCodeMotion::runOnLoop(
     Flags = std::make_unique<SinkAndHoistLICMFlags>(
         LicmMssaOptCap, LicmMssaNoAccForPromotionCap, /*IsSink=*/true, L, MSSA);
   }
-
-  // Get the preheader block to move instructions into...
-  BasicBlock *Preheader = L->getLoopPreheader();
-
-  // Compute loop safety information.
+    // Compute loop safety information.
   ICFLoopSafetyInfo SafetyInfo;
   SafetyInfo.computeLoopSafetyInfo(L);
 
+#if 0
+  // Get the preheader block to move instructions into...
+  BasicBlock *Preheader = L->getLoopPreheader();
+  Function *F = L->getHeader()->getParent();
+  std::error_code BeforeEC;
+  llvm::raw_fd_ostream BeforeOS("before_output.ll", BeforeEC, llvm::sys::fs::OF_Text);
+
+  if (!BeforeEC) {
+      F->print(BeforeOS);
+  }
+
+  BasicBlock * ScopableBasicBlock = nullptr;
+  BasicBlock * ForBodyBlock = nullptr;
+  for (BasicBlock *BB : L->blocks()) {
+    if (BB->getName().startswith("for.")) {
+        ScopableBasicBlock = BB;
+        ForBodyBlock = BB;
+
+    }
+  }
+
+  for (BasicBlock* ScopableBasicBlock : L->blocks()){
+      //Instructions specific to Heap sandbox
+      Value *PtrToInt = nullptr;
+      BasicBlock *TaintedCacheHitBlock = nullptr;
+      BasicBlock *TaintedCacheL1MissBlock = nullptr;
+      BasicBlock *TaintedCacheL2MissBlock = nullptr;
+      Instruction* LowerBound1 = nullptr;
+      Instruction* Upperbound1 = nullptr;
+      Instruction* DynamicCheckUpper = nullptr;
+      Instruction* DynamicCheckLower = nullptr;
+      Instruction* DynamicCheckCacheRange = nullptr;
+      Instruction* IndexedPointer = nullptr;
+      Value* ValuePointer = nullptr;
+
+      //Instructions specific to wasm sandbox
+      BasicBlock *WasmTaintCheckSuccess = nullptr;
+      BasicBlock *WasmTaintCheckFail = nullptr;
+      Instruction* WasmSbxHeapRangeLoad = nullptr;
+      Instruction* WasmTaintCheck = nullptr;
+      Instruction* WasmPtrToInt = nullptr;
+      Instruction* WasmTrunc = nullptr;
+      Instruction* WasmSbxPtr = nullptr;
+
+        for (Instruction &I : *ScopableBasicBlock) {
+            if (auto *LI = dyn_cast<LoadInst>(&I)) {
+                if (LI->getPointerOperand()->getName() == "lowerbound_1") {
+                    LowerBound1 = LI;
+                } else if (LI->getPointerOperand()->getName() == "upperbound_1") {
+                    Upperbound1 = LI;
+                } else if (LI->getPointerOperand()->getName() == "sbxHeapRange")
+                {
+                    WasmSbxHeapRangeLoad = LI;
+                }
+            }
+            else if (auto *CI = dyn_cast<ICmpInst>(&I)) {
+                if (CI->getName().startswith("IsoHeap.Cache_upper")) {
+                    DynamicCheckUpper = CI;
+                    if (auto PhiUpper = dyn_cast<PHINode>(DynamicCheckUpper->getOperand(0)))
+                    {
+                        if (Upperbound1 == nullptr)
+                            Upperbound1 = PhiUpper;
+                    }
+                } else if (CI->getName().startswith("IsoHeap.Cache_lower")) {
+                    DynamicCheckLower = CI;
+                    if (auto PhiLower = dyn_cast<PHINode>(DynamicCheckLower->getOperand(0)))
+                    {
+                        if (LowerBound1 == nullptr)
+                            LowerBound1 = PhiLower;
+                    }
+                }
+                else if (CI->getName().startswith("SandMem.TaintCheck")) {
+                    WasmTaintCheck = CI;
+                    if (auto TI = dyn_cast<TruncInst>(WasmTaintCheck->getOperand(1)))
+                    {
+                        WasmTrunc = TI;
+                        if (auto P2I = dyn_cast<PtrToIntInst>(TI->getOperand(0)))
+                        {
+                            WasmPtrToInt = P2I;
+                            if (auto GEPI = dyn_cast<GetElementPtrInst>(WasmPtrToInt->getOperand(0)))
+                            {
+                                WasmSbxPtr = static_cast<Instruction *>(GEPI->getOperand(0));
+                            }
+                        }
+                    }
+                }
+            } else if (auto *BR = dyn_cast<BranchInst>(&I)) {
+                for (unsigned s = 0; s < BR->getNumSuccessors(); ++s) {
+                    if ((BR->getSuccessor(s)->getName().startswith("IsoHeap_HIT"))
+                            && (BR->getOperand(0) == DynamicCheckCacheRange)) {
+                        TaintedCacheHitBlock = BR->getSuccessor(s);
+                    }
+                    else if (BR->getSuccessor(s)->getName().startswith("IsoHeap_L1.MISS")
+                            && (BR->getOperand(0) == DynamicCheckCacheRange))
+                    {
+                        TaintedCacheL1MissBlock = BR->getSuccessor(s);
+                    }
+                    else if (BR->getSuccessor(s)->getName().startswith("TaintCheck.succeeded")
+                             && (BR->getOperand(0) == WasmTaintCheck))
+                    {
+                        WasmTaintCheckSuccess = BR->getSuccessor(s);
+                    }
+                    else if (BR->getSuccessor(s)->getName().startswith("TaintCheck.failed")
+                             && (BR->getOperand(0) == WasmTaintCheck))
+                    {
+                        WasmTaintCheckFail = BR->getSuccessor(s);
+                    }
+                }
+            }
+            else if (I.getOpcode() == Instruction::And &&
+                     I.getOperand(0) == DynamicCheckLower &&
+                     I.getOperand(1) == DynamicCheckUpper) {
+                DynamicCheckCacheRange = &I;
+            }
+        }
+
+      if (TaintedCacheL1MissBlock) {
+          for (Instruction &I : *TaintedCacheL1MissBlock) {
+              if (auto *BR = dyn_cast<BranchInst>(&I)) {
+                  for (unsigned s = 0; s < BR->getNumSuccessors(); ++s) {
+                      if (BR->getSuccessor(s)->getName().startswith("IsoHeap_L2")) {
+                          TaintedCacheL2MissBlock = BR->getSuccessor(s);
+                          break;
+                      }
+                  }
+                  if (TaintedCacheL2MissBlock) {
+                      // Found the TaintedCacheL2MissBlock
+                      break;
+                  }
+              }
+          }
+      }
+
+      if (ScopableBasicBlock->getName().startswith("IsoHeap_HIT107"))
+          int i = 10;
+
+      if (WasmSbxHeapRangeLoad && WasmTaintCheckFail && WasmTaintCheckSuccess &&
+              WasmTaintCheck && WasmPtrToInt && WasmTrunc && WasmSbxPtr)
+      {
+        PHINode *IndVar = L->getCanonicalInductionVariable();
+        if (!IndVar) {
+            return false;
+        }
+
+        // Use ScalarEvolution to compute the start and end range of the induction variable
+        const SCEV *EndSCEV = SE->getBackedgeTakenCount(L);
+
+        // Convert SCEV to APInt
+        auto ConvertSCEVToValueOrAPInt = [&](const SCEV *S, LLVMContext &Context, ScalarEvolution *SE, IRBuilder<> &Builder) -> Value* {
+          if (const SCEVConstant *SC = dyn_cast<SCEVConstant>(S)) {
+              APInt Val = SC->getValue()->getValue();
+              Val = Val.sextOrTrunc(64); // Ensure the APInt is 64-bit
+              return ConstantInt::get(Context, Val);
+          } else {
+              // Initialize SCEVExpander with ScalarEvolution and the module's DataLayout
+              SCEVExpander Expander(*SE, Builder.GetInsertBlock()->getModule()->getDataLayout(), "loopbound");
+
+              // Use the Builder's insert point as the location for code expansion
+              Instruction *InsertPt = &*Builder.GetInsertPoint();
+
+              // Expand the SCEV into a runtime Value. Note that we directly pass the desired insertion point.
+              Value *ExpandedValue = Expander.expandCodeFor(S, nullptr, InsertPt); // Note: Adjust this call as needed.
+
+              return ExpandedValue; // Non-constant bound as LLVM IR Value.
+          }
+          // Fallback for unexpected cases (should not reach here in correct usage).
+          return ConstantInt::get(Type::getInt64Ty(Context), 0);
+        };
+
+        // Use ScalarEvolution to compute the end range of the induction variable
+        LLVMContext &Context = Preheader->getContext();
+        Instruction* ClonedWasmSbxHeapRangeLoad = WasmSbxHeapRangeLoad->clone();
+        Preheader->getInstList().insert(Preheader->getTerminator()->getIterator(), ClonedWasmSbxHeapRangeLoad);
+        IRBuilder<> Builder(Preheader->getTerminator());
+        Value *EndAddr = ConvertSCEVToValueOrAPInt(EndSCEV, Context, SE, Builder);
+        Value *EndAddrToInt = Builder.CreatePtrToInt(EndAddr, Type::getInt64Ty(Context), "EndAddrToInt");
+        //create a trunc instruction to change EndAddrToInt type from i64 to i32
+        Value *EndAddrToIntTruncated = Builder.CreateTrunc(EndAddrToInt, Type::getInt32Ty(Context), "EndAddrToIntTruncated");
+
+        Value *IsOutsideHeapRange = Builder.CreateICmpUGT(EndAddrToIntTruncated, ClonedWasmSbxHeapRangeLoad, "IsOutsideHeapRange");
+
+        //Preheader->getTerminator() is the terminating instruction, remove that branch instruction first
+        Builder.CreateCondBr(IsOutsideHeapRange, WasmTaintCheckFail, ForBodyBlock);
+
+        if (WasmSbxHeapRangeLoad) {
+            WasmSbxHeapRangeLoad->replaceAllUsesWith(UndefValue::get(WasmSbxHeapRangeLoad->getType()));
+            eraseInstruction(*WasmSbxHeapRangeLoad, SafetyInfo, CurAST.get(), MSSAU.get());
+        }
+
+        if (WasmTrunc) {
+            WasmTrunc->replaceAllUsesWith(UndefValue::get(WasmTrunc->getType()));
+            eraseInstruction(*WasmTrunc, SafetyInfo, CurAST.get(), MSSAU.get());
+        }
+
+        if (WasmTaintCheck) {
+            WasmTaintCheck->replaceAllUsesWith(UndefValue::get(WasmTaintCheck->getType()));
+            eraseInstruction(*WasmTaintCheck, SafetyInfo, CurAST.get(), MSSAU.get());
+        }
+
+        auto BrToForBody = Preheader->getTerminator();
+        if (auto *BranchInst = dyn_cast<llvm::BranchInst>(BrToForBody))
+        {
+            BranchInst->replaceAllUsesWith(UndefValue::get(BranchInst->getType()));
+            eraseInstruction(*BranchInst, SafetyInfo, CurAST.get(), MSSAU.get());
+        }
+
+        Instruction *TerminatorInst = ScopableBasicBlock->getTerminator();
+        if (TerminatorInst) {
+            // Check if the terminator is a conditional branch
+            if (auto *BranchInst = dyn_cast<llvm::BranchInst>(TerminatorInst)) {
+                if (BranchInst->isConditional()) {
+                    // Get the target block for the 'true' branch (first operand)
+                    BasicBlock *TargetBlock = BranchInst->getSuccessor(0);
+
+                    // Remove the old terminator instruction
+                    TerminatorInst->eraseFromParent();
+
+                    // Create a new unconditional branch to the target block
+                    llvm::BranchInst::Create(TargetBlock, ScopableBasicBlock);
+                }
+            }
+        }
+
+        ScopableBasicBlock =  WasmTaintCheckSuccess;
+      }
+      else if (LowerBound1 && Upperbound1 && DynamicCheckUpper &&
+          DynamicCheckLower && DynamicCheckCacheRange)
+      {
+          //dealing with Heap Sandbox
+          PtrToInt = DynamicCheckUpper->getOperand(1);
+          auto *IndexedPointer_1 = static_cast<Instruction *>((dyn_cast<PtrToIntInst>(PtrToInt))->getOperand(0));
+          Instruction* IndexInst = NULL;
+          //IndexedPointer will always be a getelementptr because we are always performing taint check on the result of GEP
+          if (auto* GEP = dyn_cast<GetElementPtrInst>(IndexedPointer_1))
+          {
+              IndexedPointer = static_cast<Instruction*>(GEP->getOperand(0));
+              IndexInst = static_cast<Instruction*>(GEP->getOperand(1));
+          }
+          else
+          {
+              ValuePointer = IndexedPointer_1;
+          }
+
+          if (0){
+              // Get the loop's induction variable
+              PHINode *IndVar = L->getCanonicalInductionVariable();
+              if (!IndVar) {
+                  return false;
+              }
+
+              // Use ScalarEvolution to compute the start and end range of the induction variable
+              const SCEV *StartSCEV = SE->getSCEV(IndVar);
+              const SCEV *EndSCEV = SE->getBackedgeTakenCount(L);
+
+              // Convert SCEV to APInt
+              auto ConvertSCEVToValueOrAPIntExit = [&](const SCEV *S, LLVMContext &Context, ScalarEvolution *SE, IRBuilder<> &Builder, llvm::Loop* L) -> Value* {
+                  if (const SCEVConstant *SC = dyn_cast<SCEVConstant>(S)) {
+                      APInt Val = SC->getValue()->getValue();
+                      Val = Val.sextOrTrunc(64); // Ensure the APInt is 64-bit
+                      return ConstantInt::get(Context, Val);
+                  }
+                  else
+                  {
+                      // Handle SCEVCouldNotCompute: Log an error or return a fallback value
+                      llvm::errs() << "SCEV could not be computed for the loop bound.\n";
+                      // Try extracting loop bound variable directly from the loop structure
+                      Value* loopBoundVar = nullptr;
+                      BasicBlock* exitingBlock = L->getExitingBlock();
+                      if (exitingBlock) {
+                          BranchInst* branchInst = dyn_cast<BranchInst>(exitingBlock->getTerminator());
+                          if (branchInst && branchInst->isConditional()) {
+                              Value* condition = branchInst->getCondition();
+                              if (ICmpInst* cmpInst = dyn_cast<ICmpInst>(condition)) {
+                                  for (unsigned i = 0; i < 2; ++i) {
+                                      Value* operand = cmpInst->getOperand(i);
+                                      if (LoadInst* loadInst = dyn_cast<LoadInst>(operand)) {
+                                          loopBoundVar = loadInst->getPointerOperand();
+                                          return loopBoundVar;
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      if (loopBoundVar) {
+                          // Convert loopBoundVar to the appropriate LLVM IR Value if not null
+                          return loopBoundVar;
+                      } else {
+                          return ConstantInt::get(Type::getInt64Ty(Context), 0); // Fallback value if loopBoundVar not found
+                      }
+                  }
+              };
+
+              auto ConvertSCEVToValueOrAPIntEntry = [&](const SCEV *S, LLVMContext &Context, ScalarEvolution *SE, IRBuilder<> &Builder, llvm::Loop* L) -> Value* {
+                  if (const SCEVConstant *SC = dyn_cast<SCEVConstant>(S)) {
+                      APInt Val = SC->getValue()->getValue();
+                      Val = Val.sextOrTrunc(64); // Ensure the APInt is 64-bit
+                      return ConstantInt::get(Context, Val);
+                  }
+                  else
+                  {
+                      Value* loopBoundVar = nullptr;
+                      BasicBlock* header = L->getHeader();
+                      BasicBlock* preheader = L->getLoopPreheader();
+                      if (header) {
+                          for (auto &Inst : *header) {
+                              if (auto *phi = dyn_cast<PHINode>(&Inst)) {
+                                  for (unsigned i = 0, e = phi->getNumIncomingValues(); i != e; ++i) {
+                                      if (phi->getIncomingBlock(i) == preheader) {
+                                          loopBoundVar = phi->getIncomingValue(i);
+                                          return loopBoundVar;
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
+                      if (loopBoundVar) {
+                          // Convert loopBoundVar to the appropriate LLVM IR Value if not null
+                          return loopBoundVar;
+                      } else {
+                          return ConstantInt::get(Type::getInt64Ty(Context), 0); // Fallback value if loopBoundVar not found
+                      }
+                  }
+              };
+
+
+              IRBuilder<> Builder(Preheader->getTerminator());
+              LLVMContext &Context = Preheader->getContext();
+              // Use ScalarEvolution to compute the start and end range of the induction variable
+              Value* EndAPInt = ConvertSCEVToValueOrAPIntExit(EndSCEV, Context, SE, Builder, L);
+              Value* StartAPInt = ConvertSCEVToValueOrAPIntEntry(StartSCEV, Context, SE, Builder, L);
+          }
+
+          auto findPHI = [LI](llvm::Instruction *I, llvm::ScalarEvolution* SE) ->
+                  std::tuple<llvm::Value*, std::vector<llvm::Value*>, std::map<llvm::Value*, std::vector<llvm::Value*>>> {
+              llvm::Instruction *currentInst = I;
+              llvm::PHINode *phiNode = nullptr;
+              llvm::Value *startIndex = nullptr;
+              std::vector<llvm::Value*> endValues;
+              std::map<llvm::Value*, std::vector<llvm::Value*>> dependencies;
+
+              // Walk upwards through each of its operands until it becomes a PHI instruction
+              while (currentInst != nullptr) {
+                  if (auto *phi = llvm::dyn_cast<llvm::PHINode>(currentInst)) {
+                      phiNode = phi;
+                      break;
+                  }
+                  if (currentInst->getNumOperands() > 0) {
+                      currentInst = llvm::dyn_cast<llvm::Instruction>(currentInst->getOperand(0));
+                  } else {
+                      currentInst = nullptr; // No more operands to traverse
+                  }
+              }
+
+              if (phiNode) {
+                  const llvm::Loop *loop = LI->getLoopFor(phiNode->getParent());
+                  if (loop) {
+                      llvm::BasicBlock *preheader = loop->getLoopPreheader();
+                      llvm::BasicBlock *header = loop->getHeader();
+
+                      // Check if PHI node has incoming values from header or preheader
+                      for (unsigned i = 0; i < phiNode->getNumIncomingValues(); ++i) {
+                          if (phiNode->getIncomingBlock(i) == header || phiNode->getIncomingBlock(i) == preheader) {
+                              startIndex = phiNode->getIncomingValue(i);
+                              break;
+                          }
+                      }
+
+                      llvm::SmallVector<llvm::BasicBlock*, 10> exitingBlocks;
+                      loop->getExitingBlocks(exitingBlocks);
+                      for (llvm::BasicBlock* exitBlock : exitingBlocks) {
+                          for (llvm::Instruction &Inst : *exitBlock) {
+                              if (auto *icmp = llvm::dyn_cast<llvm::ICmpInst>(&Inst)) {
+                                  // Iterate through operands to find the limit variable, excluding the Phi node
+                                  for (unsigned opIndex = 0; opIndex < icmp->getNumOperands(); ++opIndex) {
+                                      llvm::Value *operand = icmp->getOperand(opIndex);
+                                      if (operand != phiNode) { // Exclude the Phi node
+                                          endValues.push_back(operand); // This is the limit variable
+
+                                          // Collect dependencies
+                                          std::vector<llvm::Value*> depVec;
+                                          if (llvm::Instruction *depInst = llvm::dyn_cast<llvm::Instruction>(operand)) {
+                                              // Check if dependency is within the same block to include in dependencies map
+                                              if (depInst->getParent() == exitBlock) {
+                                                  depVec.push_back(depInst);
+                                              }
+                                          }
+                                          if (!depVec.empty()) {
+                                              dependencies[operand] = depVec;
+                                          }
+                                          break; // Break after finding the first non-Phi operand
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+              return std::make_tuple(startIndex, endValues, dependencies);
+          };
+
+          Value *StartAPInt = nullptr;
+          std::tuple<llvm::Value*, std::vector<llvm::Value*>, std::map<llvm::Value*, std::vector<llvm::Value*>>> result;
+
+          if (IndexInst) {
+              result = findPHI(IndexInst, SE);
+
+              // Accessing the first element (Start Variable)
+              StartAPInt = std::get<0>(result);
+          }
+
+          IRBuilder<> Builder(Preheader->getTerminator());
+          LLVMContext &Context = Preheader->getContext();
+
+          if (IndexedPointer)
+          {
+              for (auto *EndAPInt : std::get<1>(result))
+              {
+                  if (StartAPInt != EndAPInt)
+                  {
+                      Instruction* ClonedInst = IndexedPointer->clone();
+                      // Accessing the third element (Map of Dependencies)
+                      std::map<llvm::Value*, std::vector<llvm::Value*>> DepsMap = std::get<2>(result);
+
+                      Preheader->getInstList().insert(Preheader->getTerminator()->getIterator(), ClonedInst);
+                      StartAPInt = Builder.CreateGEP(ClonedInst, StartAPInt);
+                      EndAPInt = Builder.CreateGEP(ClonedInst, EndAPInt);
+                      // Call to the external bounds checking function
+                      auto *IntPtrTy = Type::getInt8PtrTy(Context); // Equivalent to C's void* in LLVM
+                      StartAPInt = Builder.CreateBitCast(StartAPInt, IntPtrTy, "castToVoidPtr");
+                      EndAPInt = Builder.CreateBitCast(EndAPInt, IntPtrTy, "castToVoidPtr");
+                      FunctionCallee CheckBoundsFunc = Preheader->getModule()->getOrInsertFunction(
+                              "checkBounds", FunctionType::get(Type::getVoidTy(Preheader->getContext()),
+                                                               {Type::getInt8PtrTy(Preheader->getContext()), Type::getInt8PtrTy(Preheader->getContext())}, false));
+                      Builder.CreateCall(CheckBoundsFunc, {StartAPInt, EndAPInt});
+                  }
+              }
+          }
+          else if (ValuePointer){
+              auto *VoidTy = Type::getVoidTy(Context); // Get the void type in the current context
+              auto *IntPtrTy = Type::getInt8PtrTy(Context); // Equivalent to C's void* in LLVM
+              StartAPInt = Builder.CreateBitCast(ValuePointer, IntPtrTy, "castToVoidPtr");
+              Value* EndAPInt = StartAPInt; // Since StartAddr is already casted, we can directly assign it to EndAddr
+              // Call to the external bounds checking function
+              FunctionCallee CheckBoundsFunc = Preheader->getModule()->getOrInsertFunction(
+                      "checkBounds", FunctionType::get(Type::getVoidTy(Preheader->getContext()),
+                                                       {Type::getInt8PtrTy(Preheader->getContext()), Type::getInt8PtrTy(Preheader->getContext())}, false));
+              Builder.CreateCall(CheckBoundsFunc, {StartAPInt, EndAPInt});
+          }
+          else
+              break;
+
+          Instruction *TerminatorInst = ScopableBasicBlock->getTerminator();
+          if (TerminatorInst) {
+              // Check if the terminator is a conditional branch
+              if (auto *BranchInst = dyn_cast<llvm::BranchInst>(TerminatorInst)) {
+                  if (BranchInst->isConditional()) {
+                      // Get the target block for the 'true' branch (first operand)
+                      BasicBlock *TrueTargetBlock = BranchInst->getSuccessor(0);
+
+                      // Instead of removing the old terminator, we update its condition to always true
+                      // First, get the LLVM context to create a constant value
+                      LLVMContext &Context = ScopableBasicBlock->getContext();
+                      // Create a constant 'true' value
+                      Constant *TrueValue = ConstantInt::getTrue(Context);
+                      // Update the condition of the branch instruction
+                      BranchInst->setCondition(TrueValue);
+                  }
+              }
+          }
+
+          if (LowerBound1) {
+              LowerBound1->replaceAllUsesWith(UndefValue::get(LowerBound1->getType()));
+              eraseInstruction(*LowerBound1, SafetyInfo, CurAST.get(), MSSAU.get());
+          }
+
+          if (Upperbound1) {
+              Upperbound1->replaceAllUsesWith(UndefValue::get(Upperbound1->getType()));
+              eraseInstruction(*Upperbound1, SafetyInfo, CurAST.get(), MSSAU.get());
+          }
+
+          if (DynamicCheckLower) {
+              DynamicCheckLower->replaceAllUsesWith(UndefValue::get(DynamicCheckLower->getType()));
+              eraseInstruction(*DynamicCheckLower, SafetyInfo, CurAST.get(), MSSAU.get());
+          }
+
+          if (DynamicCheckUpper) {
+              DynamicCheckUpper->replaceAllUsesWith(UndefValue::get(DynamicCheckUpper->getType()));
+              eraseInstruction(*DynamicCheckUpper, SafetyInfo, CurAST.get(), MSSAU.get());
+          }
+
+          if (DynamicCheckCacheRange) {
+              DynamicCheckCacheRange->replaceAllUsesWith(UndefValue::get(DynamicCheckCacheRange->getType()));
+              eraseInstruction(*DynamicCheckCacheRange, SafetyInfo, CurAST.get(), MSSAU.get());
+          }
+
+          auto removeBlockAndUpdatePredecessors = [](BasicBlock *Block) {
+              if (Block) {
+                  // Erase all instructions in the block
+                  while (!Block->empty()) {
+                      Instruction &I = Block->back();
+                      I.replaceAllUsesWith(UndefValue::get(I.getType()));
+                      I.eraseFromParent();
+                  }
+
+                  // Update predecessors to bypass the block
+                  llvm::SmallVector<BasicBlock *, 8> Predecessors(pred_begin(Block), pred_end(Block));
+                  for (BasicBlock *Pred : Predecessors) {
+                      if (BranchInst *BI = dyn_cast<BranchInst>(Pred->getTerminator())) {
+                          for (unsigned i = 0; i < BI->getNumSuccessors(); ++i) {
+                              if (BI->getSuccessor(i) == Block) {
+                                  // Update to the next logical successor of Block
+                                  BasicBlock *NextLogicalSuccessor = Block->getNextNode();
+                                  BI->setSuccessor(i, NextLogicalSuccessor);
+                              }
+                          }
+                      }
+                  }
+
+                  // Finally, erase the block
+                  Block->eraseFromParent();
+              }
+          };
+
+//          removeBlockAndUpdatePredecessors(TaintedCacheL1MissBlock);
+//          removeBlockAndUpdatePredecessors(TaintedCacheL2MissBlock);
+//          auto &blocksVector = L->getBlocksVector(); // Assuming L is a pointer to a Loop or similar structure
+//          blocksVector.erase(std::remove(blocksVector.begin(), blocksVector.end(), TaintedCacheL1MissBlock), blocksVector.end());
+//
+//          blocksVector.erase(std::remove(blocksVector.begin(), blocksVector.end(), TaintedCacheL2MissBlock), blocksVector.end());
+          ScopableBasicBlock = TaintedCacheHitBlock;
+      }
+//      else{
+//          ScopableBasicBlock = nullptr;
+//      }
+  }
+
+  std::error_code AfterEC;
+  llvm::raw_fd_ostream AfterOS("after_output.ll", AfterEC, llvm::sys::fs::OF_Text);
+  if (!AfterEC) {
+      L->getHeader()->getParent()->print(AfterOS);
+  }
+#endif
   // We want to visit all of the instructions in this loop... that are not parts
   // of our subloops (they have already had their invariants hoisted out of
   // their loop, into this loop, so there is no need to process the BODIES of

@@ -4197,6 +4197,11 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     Addr = EmitPointerWithAlignment(E->getBase(), &EltBaseInfo, &EltTBAAInfo);
     auto *Idx = EmitIdxAfterBase(/*Promote*/ true);
     QualType ptrType = E->getBase()->getType();
+    EmitDynamicNonNullCheck(Addr, BaseTy);
+    Addr = emitArraySubscriptGEP(*this, Addr, Idx, E->getType(),
+                                 !getLangOpts().isSignedOverflowDefined(),
+                                 SignedIndices, E->getExprLoc(), &ptrType,
+                                 E->getBase());
     auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy);
     if (TaintedPtrFromOffset != NULL)
     {
@@ -4211,11 +4216,6 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       }
       Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
     }
-    EmitDynamicNonNullCheck(Addr, BaseTy);
-    Addr = emitArraySubscriptGEP(*this, Addr, Idx, E->getType(),
-                                 !getLangOpts().isSignedOverflowDefined(),
-                                 SignedIndices, E->getExprLoc(), &ptrType,
-                                 E->getBase());
     // if the field  type is a tainted pointer type, then perform a temp alloca creation
         // and store the value of the pointer dereference into the temp alloca
           // and return the temp alloca address
