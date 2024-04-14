@@ -375,9 +375,9 @@ bool LoopInvariantCodeMotion::runOnLoop(
   ICFLoopSafetyInfo SafetyInfo;
   SafetyInfo.computeLoopSafetyInfo(L);
 
-#if 0
-  // Get the preheader block to move instructions into...
   BasicBlock *Preheader = L->getLoopPreheader();
+  #if 0
+  // Get the preheader block to move instructions into...
   Function *F = L->getHeader()->getParent();
   std::error_code BeforeEC;
   llvm::raw_fd_ostream BeforeOS("before_output.ll", BeforeEC, llvm::sys::fs::OF_Text);
