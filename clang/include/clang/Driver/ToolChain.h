@@ -673,6 +673,12 @@ public:
       const llvm::fltSemantics *FPType = nullptr) const {
     return llvm::DenormalMode::getIEEE();
   }
+
+    void AddWasmSBXLibArgs(const llvm::opt::ArgList &Args, llvm::opt::ArgStringList &CmdArgs) const;
+
+    void AddHeapSBXLibArgs(const llvm::opt::ArgList &Args, llvm::opt::ArgStringList &CmdArgs) const;
+
+    void HandleNoOSBX(const llvm::opt::ArgList &Args, llvm::opt::ArgStringList &CmdArgs) const;
 };
 
 /// Set a ToolChain's effective triple. Reset it when the registration object

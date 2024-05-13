@@ -1022,6 +1022,29 @@ void ToolChain::AddCXXStdlibLibArgs(const ArgList &Args,
   }
 }
 
+void ToolChain::AddWasmSBXLibArgs(const ArgList &Args, ArgStringList &CmdArgs) const {
+  if (Args.hasArg(options::OPT_fwasmsbx)) {
+    CmdArgs.push_back("-ldl");
+    CmdArgs.push_back("-lstdc++");
+    CmdArgs.push_back("-lSBX_CON_LIB");
+    CmdArgs.push_back("-lisc_lib_final");
+  }
+}
+
+void ToolChain::AddHeapSBXLibArgs(const ArgList &Args, ArgStringList &CmdArgs) const {
+  if (Args.hasArg(options::OPT_fheapsbx)) {
+    CmdArgs.push_back("-lhoard");
+  }
+}
+/**/
+//void ToolChain::HandleNoOSBX(const ArgList &Args, ArgStringList &CmdArgs) const {
+//  if (Args.hasArg(options::OPT_fnoosbx)) {
+//    // Add specific handling or modifications to CmdArgs if required
+//    // For example, you might modify default library paths or include settings
+//    CmdArgs.push_back("-DNO_OSBX");
+//  }
+//}
+
 void ToolChain::AddFilePathLibArgs(const ArgList &Args,
                                    ArgStringList &CmdArgs) const {
   for (const auto &LibPath : getFilePaths())
