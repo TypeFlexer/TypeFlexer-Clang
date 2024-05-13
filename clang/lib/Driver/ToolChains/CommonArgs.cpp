@@ -269,6 +269,10 @@ void tools::AddLinkerInputs(const ToolChain &TC, const InputInfoList &Inputs,
       A.renderAsInput(Args, CmdArgs);
     }
   }
+
+  // Custom library linking based on your flags - Moved here to ensure they are added last.
+  TC.AddWasmSBXLibArgs(Args, CmdArgs);
+  TC.AddHeapSBXLibArgs(Args, CmdArgs);
 }
 
 void tools::addLinkerCompressDebugSectionsOption(

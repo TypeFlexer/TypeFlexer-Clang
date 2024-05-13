@@ -4664,6 +4664,13 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back("-fnoopsbx");
   }
 
+  if (Args.hasArg(options::OPT_fwasmsbx)) {
+    CmdArgs.push_back("-DWASM_SBX");
+  }
+  if (Args.hasArg(options::OPT_fheapsbx)) {
+    CmdArgs.push_back("-DHEAP_SBX");
+  }
+
   if (Args.hasFlag(options::OPT_fheapsbx,
                    options::OPT_fno_heapsbx, false)) {
     CmdArgs.push_back("-fheapsbx");
