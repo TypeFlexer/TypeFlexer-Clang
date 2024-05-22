@@ -6,6 +6,7 @@ TypeFlexer provides an efficient method for program partitioning, demonstrating 
 
 ## Getting Started with TypeFlexer
 
+
 Below are the steps to compile and set up the TypeFlexer environment on your local machine. Ensure you are in your preferred working directory before you start.
 
 ### Step 1: Set Up Your Working Directory
