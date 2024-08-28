@@ -2747,6 +2747,8 @@ public:
     CallInst *registerTaintedFunction(Value *Src);
   CallInst *registerCallbackFunction(Value *Src);
     CallInst *unregisterCallbackFunction(Value *Src);
+
+    CallInst *VerifyIndexableAddressFunc(llvm::Module *M, Value*, Value*);
 };
 
 /// This provides a uniform API for creating instructions and inserting

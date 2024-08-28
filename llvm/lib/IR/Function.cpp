@@ -1337,6 +1337,20 @@ Function* Intrinsic::fetchSbxHeapAddress(Module *M){
                                                Int64Ty).getCallee());
 }
 
+Function* Intrinsic::VerifyIndexableAddress(Module *M) {
+  // Get the i1 (boolean) type and the 64-bit integer type
+  Type* Int1Ty = Type::getInt1Ty(M->getContext());
+  Type* Int64Ty = Type::getInt64Ty(M->getContext());
+
+  // Define the function to take two int64_t arguments and return an i1
+  FunctionType *FuncTy = FunctionType::get(Int1Ty, {Int64Ty, Int64Ty}, false);
+
+  // Insert or get the function in the module
+  return cast<Function>(M->getOrInsertFunction("c_licm_verify_addr", FuncTy).getCallee());
+}
+
+
+
 Function* Intrinsic::fetchSbxHeapBound(Module *M){
   //get void type
   Type* Int64Ty = Type::getInt64Ty(M->getContext());
