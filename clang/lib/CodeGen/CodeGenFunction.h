@@ -641,8 +641,10 @@ public:
   };
   FPOptions CurFPFeatures;
 
-    llvm::Value * EmitTaintedPtrDerefAdaptor(const Address BaseAddr, const QualType BaseTy);
-    llvm::Value* EmitConditionalTaintedP2OAdaptor(llvm::Value* Base);
+  llvm::Value * EmitTaintedPtrDerefAdaptor(const Address BaseAddr,
+                                           const QualType BaseTy,
+                                           bool shouldCheckSanity = true);
+  llvm::Value* EmitConditionalTaintedP2OAdaptor(llvm::Value* Base);
   static bool IsBaseExprDecoyExists(CodeGenFunction& CGF, Expr *BaseExpr, llvm::StructType *StructType);
   static bool IsBaseExprDecoyExists(CodeGenFunction &CGF, const RecordDecl *Rec,
                              llvm::StructType *StructType);
@@ -4753,23 +4755,27 @@ private:
   llvm::Value *EmitX86CpuSupports(uint64_t Mask);
   llvm::Value *EmitX86CpuInit();
   llvm::Value *FormResolverCondition(const MultiVersionResolverOption &RO);
+  llvm::Value* EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool shouldCheckSanity = true);
 
-    llvm::Value * EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr);
+  llvm::Type*  ChangeStructName(llvm::StructType *StructType);
 
-    llvm::Type*  ChangeStructName(llvm::StructType *StructType);
-    llvm::Type *FetchTemplatedTStructType(llvm::StructType *StructType);
-    llvm::Value *EmitConditionalTaintedO2PAdaptor(llvm::Value *Base);
-    llvm::Value *EmitTaintedPtrDerefAdaptor(const Address BaseAddr,
-                                            const llvm::Type *BaseTy);
-    LValue EmitGlobalVarDeclLValue(CodeGenFunction &CGF, const Expr *E,
-                                   const VarDecl *VD);
-    bool shouldEmitTaintedPtrDerefAdaptor(const CodeGenModule &CGM,
+  llvm::Value *EmitTaintedPtrDerefAdaptor(const Address BaseAddr,
                                           const llvm::Type *BaseTy);
-    bool shouldEmitTaintedPtrDerefAdaptor(CodeGenModule &CGM,
-                                          const QualType BaseTy);
-    void EmitDynamicTaintedCacheCheckBlocks(llvm::Value *Condition, llvm::Value  *ValPtr);
-    llvm::BasicBlock *EmitTaintedL1_CacheMissBlock(llvm::BasicBlock *, llvm::Value *ValPtr);
-    llvm::BasicBlock *EmitTaintedL2_CacheMissBlock(llvm::BasicBlock *, llvm::Value *ValPtr);
+  LValue EmitGlobalVarDeclLValue(CodeGenFunction &CGF, const Expr *E,
+                                 const VarDecl *VD);
+  bool shouldEmitTaintedPtrDerefAdaptor(const CodeGenModule &CGM,
+                                        const llvm::Type *BaseTy);
+  bool shouldEmitTaintedPtrDerefAdaptor(CodeGenModule &CGM,
+                                        const QualType BaseTy);
+  void EmitDynamicTaintedCacheCheckBlocks(llvm::Value *Condition, llvm::Value  *ValPtr);
+  llvm::BasicBlock *EmitTaintedL1_CacheMissBlock(llvm::BasicBlock *, llvm::Value *ValPtr);
+  llvm::BasicBlock *EmitTaintedL2_CacheMissBlock(llvm::BasicBlock *, llvm::Value *ValPtr);
+
+  Stmt * isInsideLoop(const Expr *E);
+
+  const Stmt *getParentStmt(const Stmt *CurrentStmt);
+
+  Stmt * isInsideLoop(const Stmt *S);
 };
 
 /// TargetFeatures - This class is used to check whether the builtin function

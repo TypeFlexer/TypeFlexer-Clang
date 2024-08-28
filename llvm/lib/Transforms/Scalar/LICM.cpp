@@ -376,7 +376,55 @@ bool LoopInvariantCodeMotion::runOnLoop(
   SafetyInfo.computeLoopSafetyInfo(L);
 
   BasicBlock *Preheader = L->getLoopPreheader();
-  #if 0
+  BasicBlock *ForBodyBlock = nullptr;
+  Instruction *VerifyAddrCall = nullptr;
+
+  // Traverse the loop's basic blocks to find the for.body block and the c_licm_verify_addr call
+  for (BasicBlock *BB : L->blocks()) {
+    if (BB->getName().startswith("for.body")) {
+      ForBodyBlock = BB;
+      for (Instruction &I : *BB) {
+        if (auto *Call = dyn_cast<CallInst>(&I)) {
+          if (Function *Callee = Call->getCalledFunction()) {
+            if (Callee->getName() == "c_licm_verify_addr") {
+              VerifyAddrCall = Call;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // If the call was found, move it to the preheader and replace the second argument
+  if (VerifyAddrCall && ForBodyBlock && Preheader) {
+    // Get the loop's induction variable (assumes canonical form)
+    PHINode *IndVar = L->getCanonicalInductionVariable();
+    if (IndVar) {
+      // Get the loop bound (e.g., for (i = 0; i < bound; i++))
+      const SCEV *LoopBoundSCEV = SE->getBackedgeTakenCount(L);
+
+      // Convert the SCEV to a runtime Value
+      SCEVExpander Expander(*SE, Preheader->getModule()->getDataLayout(), "loopbound");
+      IRBuilder<> Builder(Preheader->getTerminator());
+      Value *LoopBound = Expander.expandCodeFor(LoopBoundSCEV, Builder.getInt64Ty(), Preheader->getTerminator());
+
+      // Get the first argument of the original call
+      Value *Address = VerifyAddrCall->getOperand(0);
+
+      // Create the new call using the VerifyIndexableAddressFunc method
+      llvm::Value *SanityCheck = Builder.VerifyIndexableAddressFunc(Preheader->getModule(), Address, LoopBound);
+
+      // Move the original call (now SanityCheck) to the preheader
+      auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
+      SanityCheckInst->moveBefore(Preheader->getTerminator());
+
+      // Remove the original call from the for.body block
+      VerifyAddrCall->eraseFromParent();
+    }
+  }
+
+#if 0
   // Get the preheader block to move instructions into...
   Function *F = L->getHeader()->getParent();
   std::error_code BeforeEC;

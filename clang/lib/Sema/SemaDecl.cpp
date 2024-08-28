@@ -7489,12 +7489,15 @@ NamedDecl *Sema::ActOnVariableDeclarator(
   QualType R = TInfo->getType();
   // The starting location of the last token in the type
   auto typedef_resolved_type = R;
-  if (R->isTaintedPointerType() &&
-      !R->getCoreTypeInternal()->isTaintedStructureType() && R->getCoreTypeInternal()->isStructureType())
-  {
-    Diag(D.getIdentifierLoc(), diag::err_invalid_tainted_ptr_struct);
-    return nullptr;
-  }
+//We relax this rule to only hold place when the variable is part of the parameter list of a tainted function.
+//Only tainted function have to make sure pointer members are also tainted as they move to a different memory space
+
+//  if (R->isTaintedPointerType() &&
+//      !R->getCoreTypeInternal()->isTaintedStructureType() && R->getCoreTypeInternal()->isStructureType())
+//  {
+//    Diag(D.getIdentifierLoc(), diag::err_invalid_tainted_ptr_struct);
+//    return nullptr;
+//  }
 
   DeclarationName Name = GetNameForDeclarator(D).getName();
 

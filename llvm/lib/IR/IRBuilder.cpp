@@ -412,6 +412,24 @@ static CallInst *fetchSbxHeapBound(IRBuilderBase *Builder, Module *M_){
   return Builder->CreateCall(Decl);
 }
 
+static CallInst *VerifyIndexableAddress(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
+  // If the module is not provided, get it from the current insertion point
+  if (M_ == nullptr)
+    M_ = Builder->GetInsertBlock()->getParent()->getParent();
+
+  // Fetch the declaration for the intrinsic or function to check the address
+  auto *Decl = Intrinsic::VerifyIndexableAddress(M_);
+
+  // Ensure that the declaration is of the correct function type
+  assert(Decl && "Intrinsic 'c_licm_verify_addr' not found!");
+
+  // Create an array of the operands (Address and MaxIndex)
+  Value *Ops[] = { Address, MaxIndex };
+
+  // Create and return the call instruction, which returns an i1
+  return Builder->CreateCall(Decl, Ops);
+}
+
 CallInst *IRBuilderBase::CreateFAddReduce(Value *Acc, Value *Src) {
   Module *M = GetInsertBlock()->getParent()->getParent();
   Value *Ops[] = {Acc, Src};
@@ -525,6 +543,11 @@ CallInst *IRBuilderBase::FetchSbxHeapAddress(){
 CallInst *IRBuilderBase::FetchSbxHeapBound(Module* M){
   //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
     return fetchSbxHeapBound(this, M);
+}
+
+CallInst *IRBuilderBase::VerifyIndexableAddressFunc(Module* M, Value *Address, Value *MaxIndex){
+  //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
+  return VerifyIndexableAddress(this, M, Address, MaxIndex);
 }
 
 CallInst *IRBuilderBase::CreateIntMinReduce(Value *Src, bool IsSigned) {

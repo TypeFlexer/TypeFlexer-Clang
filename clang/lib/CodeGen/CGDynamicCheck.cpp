@@ -131,14 +131,15 @@ Value* CodeGenFunction::EmitTaintedPtrDerefAdaptor(const Address BaseAddr,
 }
 
 Value* CodeGenFunction::EmitTaintedPtrDerefAdaptor(const Address BaseAddr,
-                                                   const QualType BaseTy){
+                                                   const QualType BaseTy,
+                                                   bool shouldCheckSanity){
   if(!shouldEmitTaintedPtrDerefAdaptor
       (CGM, BaseTy))
     return NULL;
 
   ++NumDynamicChecksTainted;
 
-  return EmitDynamicTaintedPtrAdaptorBlock(BaseAddr);
+  return EmitDynamicTaintedPtrAdaptorBlock(BaseAddr, shouldCheckSanity);
 }
 
 
@@ -581,11 +582,12 @@ void CodeGenFunction::EmitDynamicTaintedCacheCheckBlocks(Value *Condition, Value
 }
 
 Value*
-CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr) {
+CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool shouldCheckSanity) {
 
    if (!(CGM.getCodeGenOpts().wasmsbx || CGM.getCodeGenOpts().heapsbx))
      return NULL;
-    ++NumDynamicChecksTainted;
+
+   ++NumDynamicChecksTainted;
 
     Value *PointerVal = BaseAddr.getPointer();
     // check if PointerVal is a constant
@@ -596,83 +598,89 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr) {
 
     if (CGM.getCodeGenOpts().wasmsbx) {
      //First Fetch the Heap Trackers
-     GlobalVariable *sbxHeapRange = CGM.getModule().getNamedGlobal("sbxHeapRange");
      GlobalVariable *sbxHeapBase =  CGM.getModule().getNamedGlobal("sbxHeap");
      // Load them Heap Trackers
-     Value *SbxHeapRangeLoadedVal = Builder.CreateAlignedLoad(
-         llvm::Type::getInt32Ty(BaseAddr.getPointer()->getContext()),
-         sbxHeapRange, 8, false);
      Value *SbxHeapBaseLoadedVal = Builder.CreateAlignedLoad(
          llvm::Type::getInt64Ty(BaseAddr.getPointer()->getContext()),
          sbxHeapBase, 8, false);
 
      llvm::Type *BitCastType = BaseAddr.getType();
 
-    if (BitCastType->isTStructTy() ||
-        (BitCastType->isPointerTy() &&
+     if (BitCastType->isTStructTy() || (BitCastType->isPointerTy() &&
          BitCastType->getCoreElementType()->isTStructTy())) {
-      BitCastType = ChangeStructName(
-          reinterpret_cast<StructType *>(BitCastType->getCoreElementType()));
-      if ((BitCastType != NULL) && (BitCastType->isDecoyed())) {
-        llvm::Type *CurrentTypeReferences = BaseAddr.getType();
-        while (CurrentTypeReferences->isPointerTy()) {
-          CurrentTypeReferences =
-              CurrentTypeReferences->getPointerElementType();
-          BitCastType = BitCastType->getPointerTo(0);
-        }
-        BaseAddr.setType(BitCastType);
-      } else
-        BitCastType = BaseAddr.getType();
-    }
 
-     Value *ValidTPtrOffset = NULL;
-     Value *ConditionVal = PointerVal;
-
-     if (!BaseAddr.getType()->getCoreElementType()->isFunctionTy()) {
-      // fetch codegen options
-      Value *OffsetVal32 = Builder.CreatePtrToInt(
-          BaseAddr.getPointer(),
-          llvm::Type::getInt32Ty(BaseAddr.getPointer()->getContext()));
-      Value *OffsetVal64 = Builder.CreateZExt(
-          OffsetVal32,
-          llvm::Type::getInt64Ty(BaseAddr.getPointer()->getContext()));
-      ValidTPtrOffset = OffsetVal32;
-      Value *OffsetValWithHeap = SbxHeapBaseLoadedVal;
-      Value *OffsetValWithHeapAndOffset =
-          Builder.CreateAdd(OffsetValWithHeap, OffsetVal64);
-      // Bitcast this to the type of the pointer
-      PointerVal = OffsetValWithHeapAndOffset;
-      ConditionVal =
-          Builder.CreateICmpULT(ValidTPtrOffset, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
-      EmitDynamicCheckBlocks(ConditionVal);
+         BitCastType = ChangeStructName(
+            reinterpret_cast<StructType *>(BitCastType->getCoreElementType()));
+         if ((BitCastType != NULL) && (BitCastType->isDecoyed())) {
+            llvm::Type *CurrentTypeReferences = BaseAddr.getType();
+            while (CurrentTypeReferences->isPointerTy()) {
+                CurrentTypeReferences = CurrentTypeReferences->getPointerElementType();
+                BitCastType = BitCastType->getPointerTo(0);
+            }
+            BaseAddr.setType(BitCastType);
+         } else {
+             BitCastType = BaseAddr.getType();
+         }
      }
+
+     Value *OffsetValWithHeap = SbxHeapBaseLoadedVal;
+     Value *OffsetVal32 = Builder.CreatePtrToInt(
+             BaseAddr.getPointer(),
+             llvm::Type::getInt32Ty(BaseAddr.getPointer()->getContext()));
+
+     Value *OffsetVal64 = Builder.CreateZExt(
+            OffsetVal32,
+            llvm::Type::getInt64Ty(BaseAddr.getPointer()->getContext()));
+     Value *OffsetValWithHeapAndOffset =
+            Builder.CreateAdd(OffsetValWithHeap, OffsetVal64);
+     // Bitcast this to the type of the pointer
+     PointerVal = OffsetValWithHeapAndOffset;
 
      llvm::Type *DestTy = BitCastType;
      llvm::Type *DecoyedDestTy = BitCastType;
-     if (DestTy->isTStructTy() ||
-         (DestTy->isPointerTy() &&
-          DestTy->getCoreElementType()->isTStructTy())) {
-      DestTy = DecoyedDestTy =
-          ChangeStructName(reinterpret_cast<StructType *>(DestTy));
 
-      if (DecoyedDestTy != NULL) {
-        auto *CurrentTypeReferences = DestTy;
-        while (CurrentTypeReferences->isPointerTy()) {
-          CurrentTypeReferences =
-              CurrentTypeReferences->getPointerElementType();
-          DecoyedDestTy = DecoyedDestTy->getPointerTo(0);
-        }
-      } else
-        DecoyedDestTy = BitCastType;
+     Value *ValidTPtrOffset = NULL;
+     Value *ConditionVal = NULL;
+
+     if (shouldCheckSanity)
+     {
+         GlobalVariable *sbxHeapRange = CGM.getModule().getNamedGlobal("sbxHeapRange");
+         Value *SbxHeapRangeLoadedVal = Builder.CreateAlignedLoad(
+                 llvm::Type::getInt32Ty(BaseAddr.getPointer()->getContext()),
+                 sbxHeapRange, 8, false);
+         if (!BaseAddr.getType()->getCoreElementType()->isFunctionTy()) {
+             ValidTPtrOffset = OffsetVal32;
+             ConditionVal = Builder.CreateICmpULT(ValidTPtrOffset, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
+             EmitDynamicCheckBlocks(ConditionVal);
+         }
+
+
+         if (DestTy->isTStructTy() || (DestTy->isPointerTy() && DestTy->getCoreElementType()->isTStructTy())) {
+             DestTy = DecoyedDestTy = ChangeStructName(reinterpret_cast<StructType *>(DestTy));
+
+             if (DecoyedDestTy != NULL) {
+                 auto *CurrentTypeReferences = DestTy;
+                 while (CurrentTypeReferences->isPointerTy()) {
+                     CurrentTypeReferences = CurrentTypeReferences->getPointerElementType();
+                     DecoyedDestTy = DecoyedDestTy->getPointerTo(0);
+                 }
+             }
+             else
+             {
+                 DecoyedDestTy = BitCastType;
+             }
+         }
      }
 
-     Value *CastedPointer = ConditionVal;
+     Value *CastedPointer = NULL;
      if (!BaseAddr.getType()->getCoreElementType()->isFunctionTy())
       CastedPointer = Builder.CreateIntToPtr(PointerVal, DecoyedDestTy);
 
      return CastedPointer;
+
     }
-    else if (CGM.getCodeGenOpts().heapsbx)
+
+    if (CGM.getCodeGenOpts().heapsbx)
     {
      //First Fetch the global heap variables
      GlobalVariable *lowerbound_1 = CGM.getModule().getNamedGlobal("lowerbound_1");
@@ -687,15 +695,17 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr) {
      Value *PointerAsInt64 = Builder.CreatePtrToInt(
          BaseAddr.getPointer(),
          llvm::Type::getInt64Ty(PointerVal->getContext()));
-     auto UpperChk_1 = Builder.CreateICmpULE(PointerAsInt64, upperboundVal_1,
+     auto *UpperChk_1 = Builder.CreateICmpULE(PointerAsInt64, upperboundVal_1,
                                       "IsoHeap.Cache_upper");
-     auto LowerChk_1= Builder.CreateICmpUGE(PointerAsInt64, lowerboundVal_1,
+     auto *LowerChk_1= Builder.CreateICmpUGE(PointerAsInt64, lowerboundVal_1,
                                           "IsoHeap.Cache_lower");
      llvm::Value *Condition_1 =
          Builder.CreateAnd(LowerChk_1, UpperChk_1, "IsoHeap.cache_range_1");
      EmitDynamicTaintedCacheCheckBlocks(Condition_1, PointerAsInt64);
      return BaseAddr.getPointer();
     }
+
+    return nullptr;
 }
 BasicBlock *CodeGenFunction::EmitDynamicCheckFailedBlock() {
   // Save current insert point
