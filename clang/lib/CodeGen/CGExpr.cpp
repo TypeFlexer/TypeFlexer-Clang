@@ -4016,62 +4016,6 @@ const Stmt* CodeGenFunction::getParentStmt(const Stmt* CurrentStmt) {
   return Finder.Parent;
 }
 
-bool CodeGenFunction::isInductionVariableModifiedInLoop(const Stmt *LoopStmt, const Expr *IndexExpr) {
-  // Get the variable declaration from the index expression
-  const DeclRefExpr *IndexDeclRef = dyn_cast<DeclRefExpr>(IndexExpr);
-  if (!IndexDeclRef)
-    return false;
-
-  const VarDecl *IndexVar = dyn_cast<VarDecl>(IndexDeclRef->getDecl());
-  if (!IndexVar)
-    return false;
-
-  // Use a recursive AST visitor to traverse the loop body and check for modifications
-  struct IndexModificationFinder : public RecursiveASTVisitor<IndexModificationFinder> {
-      const VarDecl *IndexVar;
-      bool Modified = false;
-
-      IndexModificationFinder(const VarDecl *Var) : IndexVar(Var) {}
-
-      bool VisitUnaryOperator(UnaryOperator *UO) {
-        if (UO->isIncrementDecrementOp()) {
-          if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(UO->getSubExpr())) {
-            if (DRE->getDecl() == IndexVar) {
-              Modified = true;
-              return false; // Stop traversal if modification is found
-            }
-          }
-        }
-        return true;
-      }
-
-      bool VisitBinaryOperator(BinaryOperator *BO) {
-        if (BO->isAssignmentOp() || BO->isCompoundAssignmentOp()) {
-          if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(BO->getLHS())) {
-            if (DRE->getDecl() == IndexVar) {
-              Modified = true;
-              return false; // Stop traversal if modification is found
-            }
-          }
-        }
-        return true;
-      }
-  };
-
-  // Initialize the visitor and traverse the loop body
-  IndexModificationFinder Finder(IndexVar);
-
-  if (const ForStmt *FS = dyn_cast<ForStmt>(LoopStmt)) {
-    Finder.TraverseStmt(const_cast<Stmt *>(FS->getBody()));
-  } else if (const WhileStmt *WS = dyn_cast<WhileStmt>(LoopStmt)) {
-    Finder.TraverseStmt(const_cast<Stmt *>(WS->getBody()));
-  } else if (const DoStmt *DS = dyn_cast<DoStmt>(LoopStmt)) {
-    Finder.TraverseStmt(const_cast<Stmt *>(DS->getBody()));
-  }
-
-  return Finder.Modified;
-}
-
 
 Expr* CodeGenFunction::getLoopBoundForIndex(const Expr *IndexExpr) {
   const Stmt *CurrentStmt = IndexExpr;
@@ -4105,13 +4049,90 @@ Expr* CodeGenFunction::getLoopBoundForIndex(const Expr *IndexExpr) {
   return nullptr; // No governing loop found
 }
 
+bool CodeGenFunction::isPointerReassignedInLoop(const VarDecl *PointerVar, const Stmt *LoopStmt) {
+  struct PointerReassignmentFinder : public RecursiveASTVisitor<PointerReassignmentFinder> {
+      const VarDecl *PointerVar;
+      bool Reassigned = false;
+
+      PointerReassignmentFinder(const VarDecl *Var) : PointerVar(Var) {}
+
+      bool VisitBinaryOperator(BinaryOperator *BO) {
+        if (BO->getOpcode() == BO_Assign) {
+          if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(BO->getLHS())) {
+            if (DRE->getDecl() == PointerVar) {
+              Reassigned = true;
+              return false; // Stop traversal if reassignment is found
+            }
+          }
+        }
+        return true;
+      }
+  };
+
+  PointerReassignmentFinder Finder(PointerVar);
+  Finder.TraverseStmt(const_cast<Stmt *>(LoopStmt));
+  return Finder.Reassigned;
+}
+
+bool CodeGenFunction::isPointerPassedByReferenceInLoop(const VarDecl *PointerVar, const Stmt *LoopStmt) {
+  struct PointerReferencePassFinder : public RecursiveASTVisitor<PointerReferencePassFinder> {
+      const VarDecl *PointerVar;
+      bool PassedByReference = false;
+
+      PointerReferencePassFinder(const VarDecl *Var) : PointerVar(Var) {}
+
+      bool VisitCallExpr(CallExpr *CE) {
+        for (unsigned i = 0, e = CE->getNumArgs(); i != e; ++i) {
+          const Expr *Arg = CE->getArg(i);
+          // Check if the argument is a UnaryOperator with the address-of operator (&)
+          if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(Arg)) {
+            if (UO->getOpcode() == UO_AddrOf) {
+              if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(UO->getSubExpr())) {
+                if (DRE->getDecl() == PointerVar) {
+                  PassedByReference = true;
+                  return false; // Stop traversal if passed by reference
+                }
+              }
+            }
+          }
+        }
+        return true;
+      }
+  };
+
+  PointerReferencePassFinder Finder(PointerVar);
+  Finder.TraverseStmt(const_cast<Stmt *>(LoopStmt));
+  return Finder.PassedByReference;
+}
+
 Expr* CodeGenFunction::isInsideLoop(const Stmt *S) {
   // Start from the array subscript index expression
-  if (const ArraySubscriptExpr *ASE = dyn_cast<ArraySubscriptExpr>(S)) {
-    return getLoopBoundForIndex(ASE->getIdx());
+  Expr* LoopExpr = nullptr;
+  const ArraySubscriptExpr *ASE = dyn_cast<ArraySubscriptExpr>(S);
+
+  if (!ASE)
+    return nullptr;
+
+  LoopExpr = getLoopBoundForIndex(ASE->getIdx());
+
+  const Expr *BaseExpr = ASE->getBase()->IgnoreParenImpCasts();
+  const DeclRefExpr *BaseDeclRef = dyn_cast<DeclRefExpr>(BaseExpr);
+
+  if (!BaseDeclRef)
+    return nullptr; // This guy is returning NULL
+
+  const VarDecl *BaseVar = dyn_cast<VarDecl>(BaseDeclRef->getDecl());
+
+  if (isPointerReassignedInLoop(BaseVar, LoopExpr)) {
+    return nullptr;
   }
 
-  return nullptr;
+  // Check Rule 2: Ensure the pointer is not passed by reference within the loop
+  if (isPointerPassedByReferenceInLoop(BaseVar, LoopExpr)) {
+    return nullptr;
+  }
+
+  return LoopExpr;
 }
 
 Expr *CodeGenFunction::isInsideLoop(const Expr *E) {

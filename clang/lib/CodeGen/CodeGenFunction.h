@@ -4780,6 +4780,10 @@ private:
     Expr *getLoopBoundForIndex(const Expr *IndexExpr);
 
     bool isInductionVariableModifiedInLoop(const Stmt *LoopStmt, const Expr *IndexExpr);
+
+    bool isPointerReassignedInLoop(const VarDecl *PointerVar, const Stmt *LoopStmt);
+
+    bool isPointerPassedByReferenceInLoop(const VarDecl *PointerVar, const Stmt *LoopStmt);
 };
 
 /// TargetFeatures - This class is used to check whether the builtin function
