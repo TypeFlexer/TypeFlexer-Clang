@@ -4016,26 +4016,85 @@ const Stmt* CodeGenFunction::getParentStmt(const Stmt* CurrentStmt) {
   return Finder.Parent;
 }
 
-Stmt * CodeGenFunction::isInsideLoop(const Stmt *S) {
-  // Start with the current statement or expression
-  const Stmt *CurrentStmt = S;
+bool CodeGenFunction::isInductionVariableModifiedInLoop(const Stmt *LoopStmt, const Expr *IndexExpr) {
+  // Get the variable declaration from the index expression
+  const DeclRefExpr *IndexDeclRef = dyn_cast<DeclRefExpr>(IndexExpr);
+  if (!IndexDeclRef)
+    return false;
+
+  const VarDecl *IndexVar = dyn_cast<VarDecl>(IndexDeclRef->getDecl());
+  if (!IndexVar)
+    return false;
+
+  // Use a recursive AST visitor to traverse the loop body and check for modifications
+  struct IndexModificationFinder : public RecursiveASTVisitor<IndexModificationFinder> {
+      const VarDecl *IndexVar;
+      bool Modified = false;
+
+      IndexModificationFinder(const VarDecl *Var) : IndexVar(Var) {}
+
+      bool VisitUnaryOperator(UnaryOperator *UO) {
+        if (UO->isIncrementDecrementOp()) {
+          if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(UO->getSubExpr())) {
+            if (DRE->getDecl() == IndexVar) {
+              Modified = true;
+              return false; // Stop traversal if modification is found
+            }
+          }
+        }
+        return true;
+      }
+
+      bool VisitBinaryOperator(BinaryOperator *BO) {
+        if (BO->isAssignmentOp() || BO->isCompoundAssignmentOp()) {
+          if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(BO->getLHS())) {
+            if (DRE->getDecl() == IndexVar) {
+              Modified = true;
+              return false; // Stop traversal if modification is found
+            }
+          }
+        }
+        return true;
+      }
+  };
+
+  // Initialize the visitor and traverse the loop body
+  IndexModificationFinder Finder(IndexVar);
+
+  if (const ForStmt *FS = dyn_cast<ForStmt>(LoopStmt)) {
+    Finder.TraverseStmt(const_cast<Stmt *>(FS->getBody()));
+  } else if (const WhileStmt *WS = dyn_cast<WhileStmt>(LoopStmt)) {
+    Finder.TraverseStmt(const_cast<Stmt *>(WS->getBody()));
+  } else if (const DoStmt *DS = dyn_cast<DoStmt>(LoopStmt)) {
+    Finder.TraverseStmt(const_cast<Stmt *>(DS->getBody()));
+  }
+
+  return Finder.Modified;
+}
+
+
+Expr* CodeGenFunction::getLoopBoundForIndex(const Expr *IndexExpr) {
+  const Stmt *CurrentStmt = IndexExpr;
 
   while (CurrentStmt) {
     // Find the parent of the current statement
     Stmt *ParentStmt = const_cast<Stmt *>(getParentStmt(CurrentStmt));
 
-    // Check if the parent statement is a loop
-    if (isa<ForStmt>(ParentStmt) || isa<WhileStmt>(ParentStmt) || isa<DoStmt>(ParentStmt)) {
-      return ParentStmt; // Found a loop, return true
+    // Check if the parent statement is a loop that directly governs this index
+    if (const ForStmt *FS = dyn_cast<ForStmt>(ParentStmt)) {
+      return (Expr *) FS;  // Return the ForStmt itself
+    } else if (const WhileStmt *WS = dyn_cast<WhileStmt>(ParentStmt)) {
+      return (Expr *) (WS);  // Return the WhileStmt itself
+    } else if (const DoStmt *DS = dyn_cast<DoStmt>(ParentStmt)) {
+      return (Expr *) (DS);  // Return the DoStmt itself
     }
 
-    // If the parent is a compound statement, move up the tree
-    if (isa<CompoundStmt>(ParentStmt) || isa<BinaryOperator>(ParentStmt)) {
-      CurrentStmt = ParentStmt;
+    // Move upwards in the AST
+    if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(ParentStmt)) {
+      CurrentStmt = CS;
       continue;
     }
 
-    // If ParentStmt is not a compound statement, check if it can be an expression
     if (const Expr *ParentExpr = dyn_cast<Expr>(ParentStmt)) {
       CurrentStmt = ParentExpr;
     } else {
@@ -4043,19 +4102,28 @@ Stmt * CodeGenFunction::isInsideLoop(const Stmt *S) {
     }
   }
 
-  return NULL; // No loop found, return false
+  return nullptr; // No governing loop found
 }
 
-Stmt * CodeGenFunction::isInsideLoop(const Expr *E) {
+Expr* CodeGenFunction::isInsideLoop(const Stmt *S) {
+  // Start from the array subscript index expression
+  if (const ArraySubscriptExpr *ASE = dyn_cast<ArraySubscriptExpr>(S)) {
+    return getLoopBoundForIndex(ASE->getIdx());
+  }
+
+  return nullptr;
+}
+
+Expr *CodeGenFunction::isInsideLoop(const Expr *E) {
   return isInsideLoop(cast<Stmt>(E));
 }
 
 LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
                                                bool Accessed) {
   bool shouldCheckSanity = true;
-  Stmt * NearestLoopStmt = isInsideLoop(E);
+  Expr *LoopExpr = isInsideLoop(E);
 
-  if (NearestLoopStmt)
+  if (LoopExpr)
     shouldCheckSanity = false;
 
   // The index must always be an integer, which is not an aggregate.  Emit it
@@ -4114,10 +4182,10 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
     }
 
-    if (NearestLoopStmt)
+    if (LoopExpr)
     {
       // Create a constant value of -1 (as a placeholder for MaxIdx)
-      llvm::Value *MaxIdx = llvm::ConstantInt::get(llvm::Type::getInt64Ty(CGM.getLLVMContext()), -1, true);
+      llvm::Value *MaxIdx = Idx;
 
       // Convert the pointer (Addr) to an i64 integer type
       llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
@@ -4150,15 +4218,31 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       LV.setAddress(Addr);
     }
 
-    if (NearestLoopStmt ) {
-      // Create a constant value of -1 (as a placeholder for MaxIdx)
-      llvm::Value *MaxIdx = llvm::ConstantInt::get(llvm::Type::getInt64Ty(CGM.getLLVMContext()), -1, true);
+    if (LoopExpr) {
+     // Generate the LLVM IR for evaluating LoopExpr
+     llvm::Value *LoopBoundValue = EmitScalarExpr(LoopExpr);
 
-      // Convert the pointer (Addr) to an i64 integer type
-      llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
+     llvm::Type *Int64Ty = llvm::Type::getInt64Ty(CGM.getLLVMContext());
+     LValueBaseInfo BaseInfo;
+     TBAAAccessInfo TBAAInfo;
 
-      // Create the sanity check call with the address and MaxIdx
-      Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+     // Check if LoopBoundValue is a pointer, and if so, load the value it points to
+     if (LoopBoundValue->getType()->isPointerTy()) {
+        // Emit the address with alignment from the LoopExpr
+        Address const Addr = EmitPointerWithAlignment(LoopExpr, &BaseInfo, &TBAAInfo);
+        LoopBoundValue = Builder.CreateLoad(Addr, false, "loopbound.load");
+     } else if (LoopBoundValue->getType() != Int64Ty) {
+        // Cast the value to Int64 if it's not already
+        LoopBoundValue = Builder.CreateIntCast(LoopBoundValue, Int64Ty, true, "loopbound.cast");
+     }
+
+     // Assign the loaded or cast value to MaxIdx
+     llvm::Value *MaxIdx = Idx;
+     // Convert the pointer (Addr) to an i64 integer type
+     llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
+
+     // Create the sanity check call with the address and MaxIdx
+     Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
     }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
@@ -4195,9 +4279,9 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
     }
 
-    if (NearestLoopStmt) {
+    if (LoopExpr) {
       // Create a constant value of -1 (as a placeholder for MaxIdx)
-      llvm::Value *MaxIdx = llvm::ConstantInt::get(llvm::Type::getInt64Ty(CGM.getLLVMContext()), -1, true);
+      llvm::Value *MaxIdx = Idx;
 
       // Convert the pointer (Addr) to an i64 integer type
       llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
@@ -4249,9 +4333,9 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
     }
 
-    if (NearestLoopStmt) {
+    if (LoopExpr) {
       // Create a constant value of -1 (as a placeholder for MaxIdx)
-      llvm::Value *MaxIdx = llvm::ConstantInt::get(llvm::Type::getInt64Ty(CGM.getLLVMContext()), -1, true);
+      llvm::Value *MaxIdx = Idx;
 
       // Convert the pointer (Addr) to an i64 integer type
       llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
@@ -4312,9 +4396,10 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     auto *Idx = EmitIdxAfterBase(/*Promote*/ true);
     QualType ptrType = E->getBase()->getType();
     EmitDynamicNonNullCheck(Addr, BaseTy);
-    if (NearestLoopStmt) {
+
+    if (LoopExpr) {
       // Create a constant value of -1 (as a placeholder for MaxIdx)
-      llvm::Value *MaxIdx = llvm::ConstantInt::get(llvm::Type::getInt64Ty(CGM.getLLVMContext()), -1, true);
+      llvm::Value *MaxIdx = Idx;
 
       // Convert the pointer (Addr) to an i64 integer type
       llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));

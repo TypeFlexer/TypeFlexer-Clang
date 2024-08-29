@@ -4771,11 +4771,15 @@ private:
   llvm::BasicBlock *EmitTaintedL1_CacheMissBlock(llvm::BasicBlock *, llvm::Value *ValPtr);
   llvm::BasicBlock *EmitTaintedL2_CacheMissBlock(llvm::BasicBlock *, llvm::Value *ValPtr);
 
-  Stmt * isInsideLoop(const Expr *E);
+  Expr * isInsideLoop(const Expr *E);
 
   const Stmt *getParentStmt(const Stmt *CurrentStmt);
 
-  Stmt * isInsideLoop(const Stmt *S);
+  Expr * isInsideLoop(const Stmt *S);
+
+    Expr *getLoopBoundForIndex(const Expr *IndexExpr);
+
+    bool isInductionVariableModifiedInLoop(const Stmt *LoopStmt, const Expr *IndexExpr);
 };
 
 /// TargetFeatures - This class is used to check whether the builtin function

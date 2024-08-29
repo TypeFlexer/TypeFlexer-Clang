@@ -403,24 +403,28 @@ bool LoopInvariantCodeMotion::runOnLoop(
     if (IndVar) {
       // Get the loop bound (e.g., for (i = 0; i < bound; i++))
       const SCEV *LoopBoundSCEV = SE->getBackedgeTakenCount(L);
+      Value *CallIndVar = VerifyAddrCall->getOperand(1);
 
-      // Convert the SCEV to a runtime Value
-      SCEVExpander Expander(*SE, Preheader->getModule()->getDataLayout(), "loopbound");
-      IRBuilder<> Builder(Preheader->getTerminator());
-      Value *LoopBound = Expander.expandCodeFor(LoopBoundSCEV, Builder.getInt64Ty(), Preheader->getTerminator());
+      if (CallIndVar == IndVar)
+      {
+        // Convert the SCEV to a runtime Value
+        SCEVExpander Expander(*SE, Preheader->getModule()->getDataLayout(), "loopbound");
+        IRBuilder<> Builder(Preheader->getTerminator());
+        Value *LoopBound = Expander.expandCodeFor(LoopBoundSCEV, Builder.getInt64Ty(), Preheader->getTerminator());
 
-      // Get the first argument of the original call
-      Value *Address = VerifyAddrCall->getOperand(0);
+        // Get the first argument of the original call
+        Value *Address = VerifyAddrCall->getOperand(0);
 
-      // Create the new call using the VerifyIndexableAddressFunc method
-      llvm::Value *SanityCheck = Builder.VerifyIndexableAddressFunc(Preheader->getModule(), Address, LoopBound);
+        // Create the new call using the VerifyIndexableAddressFunc method
+        llvm::Value *SanityCheck = Builder.VerifyIndexableAddressFunc(Preheader->getModule(), Address, LoopBound);
 
-      // Move the original call (now SanityCheck) to the preheader
-      auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
-      SanityCheckInst->moveBefore(Preheader->getTerminator());
+        // Move the original call (now SanityCheck) to the preheader
+        auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
+        SanityCheckInst->moveBefore(Preheader->getTerminator());
 
-      // Remove the original call from the for.body block
-      VerifyAddrCall->eraseFromParent();
+        // Remove the original call from the for.body block
+        VerifyAddrCall->eraseFromParent();
+      }
     }
   }
 
