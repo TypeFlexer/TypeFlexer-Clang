@@ -3923,7 +3923,7 @@ public:
 
   llvm::Value *EmitIvarOffset(const ObjCInterfaceDecl *Interface,
                               const ObjCIvarDecl *Ivar);
-  LValue EmitLValueForField(LValue Base, const FieldDecl* Field,  bool isFieldAnArrowAccess = true);
+  LValue EmitLValueForField(LValue Base, const FieldDecl* Field,  bool isFieldAnArrowAccess = true, Expr* = nullptr);
   LValue EmitLValueForLambdaField(const FieldDecl *Field);
 
   /// EmitLValueForFieldInitialization - Like EmitLValueForField, except that

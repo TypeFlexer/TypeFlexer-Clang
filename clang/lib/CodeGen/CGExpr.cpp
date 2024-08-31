@@ -624,7 +624,7 @@ EmitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *M) {
 
     case SubobjectAdjustment::FieldAdjustment: {
       LValue LV = MakeAddrLValue(Object, E->getType(), AlignmentSource::Decl);
-      LV = EmitLValueForField(LV, Adjustment.Field);
+      LV = EmitLValueForField(LV, Adjustment.Field, M);
       assert(LV.isSimple() &&
              "materialized temporary field is not a simple lvalue");
       Object = LV.getAddress(*this);
@@ -4240,10 +4240,14 @@ Expr *CodeGenFunction::isInsideLoop(const Expr *E) {
 LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
                                                bool Accessed) {
   bool shouldCheckSanity = true;
-  Expr *LoopExpr = isInsideLoop(E);
+  Expr *LoopExpr = nullptr;
+  if (E->getBase()->getType()->isTaintedPointerType())
+  {
+      LoopExpr = isInsideLoop(E);
 
-  if (LoopExpr)
-    shouldCheckSanity = false;
+      if (LoopExpr)
+          shouldCheckSanity = false;
+  }
 
   // The index must always be an integer, which is not an aggregate.  Emit it
   // in lexical order (this complexity is, sadly, required by C++17).
@@ -4894,7 +4898,7 @@ LValue CodeGenFunction::EmitMemberExpr(const MemberExpr *E) {
 
   NamedDecl *ND = E->getMemberDecl();
   if (auto *Field = dyn_cast<FieldDecl>(ND)) {
-    LValue LV = EmitLValueForField(BaseLV, Field, E->isArrow());
+    LValue LV = EmitLValueForField(BaseLV, Field, E->isArrow(), BaseExpr);
     setObjCGCLValueClass(getContext(), E, LV);
     if (getLangOpts().OpenMP) {
       // If the member was explicitly marked as nontemporal, mark it as
@@ -5125,7 +5129,7 @@ static bool hasAnyVptr(const QualType Type, const ASTContext &Context) {
 }
 
 LValue CodeGenFunction::EmitLValueForField(LValue base,
-                                           const FieldDecl *field, bool isFieldAnArrowAccess) {
+                                           const FieldDecl *field, bool isFieldAnArrowAccess, Expr* BaseExpr) {
   LValueBaseInfo BaseInfo = base.getBaseInfo();
 
   if (field->isBitField()) {
@@ -5273,7 +5277,7 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
       llvm::Value* InstrumentedVal = NULL;
       if (isFieldAnArrowAccess)
         InstrumentedVal = EmitTaintedPtrDerefAdaptor(addr,
-        field->getParent()->getTypeForDecl()->getCoreTypeInternal());
+                                                     BaseExpr->getType());
       if(InstrumentedVal != NULL)
           addr = Address(InstrumentedVal, addr.getAlignment());
       if (!IsInPreservedAIRegion &&
