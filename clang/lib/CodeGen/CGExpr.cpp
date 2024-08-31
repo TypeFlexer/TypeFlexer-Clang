@@ -4022,7 +4022,11 @@ Expr* CodeGenFunction::getLoopBoundForIndex(const Expr *IndexExpr) {
 
   while (CurrentStmt) {
     // Find the parent of the current statement
-    Stmt *ParentStmt = const_cast<Stmt *>(getParentStmt(CurrentStmt));
+    const Stmt *ParentStmt = getParentStmt(CurrentStmt);
+
+    if (!ParentStmt) {
+      break; // No parent statement, stop traversal
+    }
 
     // Check if the parent statement is a loop that directly governs this index
     if (const ForStmt *FS = dyn_cast<ForStmt>(ParentStmt)) {
@@ -4033,20 +4037,86 @@ Expr* CodeGenFunction::getLoopBoundForIndex(const Expr *IndexExpr) {
       return (Expr *) (DS);  // Return the DoStmt itself
     }
 
-    // Move upwards in the AST
-    if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(ParentStmt)) {
-      CurrentStmt = CS;
+    // Handle conditional statements
+    if (const IfStmt *IS = dyn_cast<IfStmt>(ParentStmt)) {
+      // Continue moving up, as the loop may be outside the if-else block
+      CurrentStmt = IS;
       continue;
     }
 
-    if (const Expr *ParentExpr = dyn_cast<Expr>(ParentStmt)) {
-      CurrentStmt = ParentExpr;
-    } else {
-      break; // Stop if ParentStmt is not an expression or a compound statement
+    if (const SwitchStmt *SS = dyn_cast<SwitchStmt>(ParentStmt)) {
+      // Continue moving up, as the loop may be outside the switch block
+      CurrentStmt = SS;
+      continue;
     }
+
+    if (const ConditionalOperator *CO = dyn_cast<ConditionalOperator>(ParentStmt)) {
+      // Handle ternary conditional operator (condition ? true_expr : false_expr)
+      CurrentStmt = CO;
+      continue;
+    }
+
+    // Move upwards in the AST
+    CurrentStmt = ParentStmt;
   }
 
   return nullptr; // No governing loop found
+}
+
+bool CodeGenFunction::isPointerReassignedInLoop(const ValueDecl *PointerDecl, const Stmt *LoopStmt) {
+  struct PointerReassignmentFinder : public RecursiveASTVisitor<PointerReassignmentFinder> {
+      const ValueDecl *PointerDecl;
+      bool Reassigned = false;
+
+      PointerReassignmentFinder(const ValueDecl *Decl) : PointerDecl(Decl) {}
+
+      bool VisitBinaryOperator(BinaryOperator *BO) {
+        if (BO->getOpcode() == BO_Assign) {
+          if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(BO->getLHS())) {
+            if (DRE->getDecl() == PointerDecl) {
+              Reassigned = true;
+              return false; // Stop traversal if reassignment is found
+            }
+          }
+        }
+        return true;
+      }
+  };
+
+  PointerReassignmentFinder Finder(PointerDecl);
+  Finder.TraverseStmt(const_cast<Stmt *>(LoopStmt));
+  return Finder.Reassigned;
+}
+
+bool CodeGenFunction::isPointerPassedByReferenceInLoop(const ValueDecl *PointerDecl, const Stmt *LoopStmt) {
+  struct PointerReferencePassFinder : public RecursiveASTVisitor<PointerReferencePassFinder> {
+      const ValueDecl *PointerDecl;
+      bool PassedByReference = false;
+
+      PointerReferencePassFinder(const ValueDecl *Decl) : PointerDecl(Decl) {}
+
+      bool VisitCallExpr(CallExpr *CE) {
+        for (unsigned i = 0, e = CE->getNumArgs(); i != e; ++i) {
+          const Expr *Arg = CE->getArg(i);
+          // Check if the argument is a UnaryOperator with the address-of operator (&)
+          if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(Arg)) {
+            if (UO->getOpcode() == UO_AddrOf) {
+              if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(UO->getSubExpr())) {
+                if (DRE->getDecl() == PointerDecl) {
+                  PassedByReference = true;
+                  return false; // Stop traversal if passed by reference
+                }
+              }
+            }
+          }
+        }
+        return true;
+      }
+  };
+
+  PointerReferencePassFinder Finder(PointerDecl);
+  Finder.TraverseStmt(const_cast<Stmt *>(LoopStmt));
+  return Finder.PassedByReference;
 }
 
 bool CodeGenFunction::isPointerReassignedInLoop(const VarDecl *PointerVar, const Stmt *LoopStmt) {
@@ -4099,7 +4169,6 @@ bool CodeGenFunction::isPointerPassedByReferenceInLoop(const VarDecl *PointerVar
         return true;
       }
   };
-
   PointerReferencePassFinder Finder(PointerVar);
   Finder.TraverseStmt(const_cast<Stmt *>(LoopStmt));
   return Finder.PassedByReference;
@@ -4116,20 +4185,49 @@ Expr* CodeGenFunction::isInsideLoop(const Stmt *S) {
   LoopExpr = getLoopBoundForIndex(ASE->getIdx());
 
   const Expr *BaseExpr = ASE->getBase()->IgnoreParenImpCasts();
-  const DeclRefExpr *BaseDeclRef = dyn_cast<DeclRefExpr>(BaseExpr);
+  const VarDecl *CurrentVarDecl = nullptr;
+  const FieldDecl *CurrentFieldDecl = nullptr;
+  const Expr *CurrentExpr = BaseExpr;
 
-  if (!BaseDeclRef)
-    return nullptr; // This guy is returning NULL
+  while (true) {
+    if (const MemberExpr *ME = dyn_cast<MemberExpr>(CurrentExpr)) {
+      // Get the base of the member expression (the parent structure)
+      const Expr *MemberBaseExpr = ME->getBase()->IgnoreParenImpCasts();
 
-  const VarDecl *BaseVar = dyn_cast<VarDecl>(BaseDeclRef->getDecl());
+      // Get the FieldDecl for the member 'node'
+      CurrentFieldDecl = dyn_cast<FieldDecl>(ME->getMemberDecl());
 
-  if (isPointerReassignedInLoop(BaseVar, LoopExpr)) {
-    return nullptr;
-  }
+      if (CurrentFieldDecl) {
+        // Check if the FieldDecl 'node' is reassigned or passed by reference in the loop
+        if (isPointerReassignedInLoop(CurrentFieldDecl, LoopExpr) ||
+            isPointerPassedByReferenceInLoop(CurrentFieldDecl, LoopExpr)) {
+          return nullptr;
+        }
+      } else {
+        // Handle cases where MemberDecl is a VarDecl or another type of member
+        CurrentVarDecl = dyn_cast<VarDecl>(ME->getMemberDecl());
+        if (CurrentVarDecl &&
+            (isPointerReassignedInLoop(CurrentVarDecl, LoopExpr) ||
+             isPointerPassedByReferenceInLoop(CurrentVarDecl, LoopExpr))) {
+          return nullptr;
+        }
+      }
 
-  // Check Rule 2: Ensure the pointer is not passed by reference within the loop
-  if (isPointerPassedByReferenceInLoop(BaseVar, LoopExpr)) {
-    return nullptr;
+      // Move to the base of the member expression for the next iteration
+      CurrentExpr = MemberBaseExpr;
+
+    } else if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(CurrentExpr)) {
+      // If we've reached the top-level DeclRefExpr (the outermost pointer)
+      CurrentVarDecl = dyn_cast<VarDecl>(DRE->getDecl());
+      if (CurrentVarDecl &&
+          (isPointerReassignedInLoop(CurrentVarDecl, LoopExpr) ||
+           isPointerPassedByReferenceInLoop(CurrentVarDecl, LoopExpr))) {
+        return nullptr;
+      }
+      break; // Break out since we've reached the top level
+    } else {
+      break; // No more levels to traverse, exit the loop
+    }
   }
 
   return LoopExpr;
