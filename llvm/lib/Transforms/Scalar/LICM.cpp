@@ -386,7 +386,7 @@ bool LoopInvariantCodeMotion::runOnLoop(
   std::unique_ptr<AliasSetTracker> CurAST;
   std::unique_ptr<MemorySSAUpdater> MSSAU;
   std::unique_ptr<SinkAndHoistLICMFlags> Flags;
-
+  llvm::Function* CurFn = L->getHeader()->getParent();
   if (!MSSA) {
     LLVM_DEBUG(dbgs() << "LICM: Using Alias Set Tracker.\n");
     CurAST = collectAliasInfoForLoop(L, LI, AA);
@@ -688,7 +688,7 @@ bool LoopInvariantCodeMotion::runOnLoop(
 
             if (LoopBound) {
               // Create the new call using the VerifyIndexableAddressFunc method
-              llvm::Value *SanityCheck = Builder.VerifyIndexableAddressFunc(LoopBoundBlock->getModule(),
+              llvm::Value *SanityCheck = Builder.Verify_Wasm_ptr(LoopBoundBlock->getModule(), CurFn,
                                                                             DuplicatedAddress, LoopBound);
               auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
 

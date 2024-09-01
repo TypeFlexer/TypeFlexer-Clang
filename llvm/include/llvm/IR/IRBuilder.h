@@ -2749,6 +2749,8 @@ public:
     CallInst *unregisterCallbackFunction(Value *Src);
 
     CallInst *VerifyIndexableAddressFunc(llvm::Module *M, Value*, Value*);
+
+    Value *Verify_Wasm_ptr(Module *M, llvm::Function*, Value *Address, Value *MaxIndex);
 };
 
 /// This provides a uniform API for creating instructions and inserting

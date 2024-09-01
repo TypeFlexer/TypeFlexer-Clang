@@ -430,6 +430,92 @@ static CallInst *VerifyIndexableAddress(IRBuilderBase *Builder, Module *M_, Valu
   return Builder->CreateCall(Decl, Ops);
 }
 
+static Value *EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *CurFn, Value *Address, Value *MaxIndex) {
+    if (M_ == nullptr)
+        M_ = Builder->GetInsertBlock()->getParent()->getParent();
+
+    // Fetch global variables
+    GlobalVariable *sbxHeapRange = M_->getNamedGlobal("sbxHeapRange");
+    GlobalVariable *sbxHeapBase = M_->getNamedGlobal("sbxHeap");
+
+    // Check if the globals were found
+    if (!sbxHeapRange) {
+        llvm::errs() << "Error: Global variable 'sbxHeapRange' not found!\n";
+        return nullptr;
+    }
+    if (!sbxHeapBase) {
+        llvm::errs() << "Error: Global variable 'sbxHeapBase' not found!\n";
+        return nullptr;
+    }
+
+    // Check if the global values are already loaded in the current basic block
+    Value *SbxHeapRangeLoadedVal = nullptr;
+    Value *SbxHeapBaseLoadedVal = nullptr;
+
+    BasicBlock *CurrentBB = Builder->GetInsertBlock();
+    for (Instruction &I : *CurrentBB) {
+        if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
+            if (LI->getPointerOperand() == sbxHeapRange) {
+                SbxHeapRangeLoadedVal = LI;
+            } else if (LI->getPointerOperand() == sbxHeapBase) {
+                SbxHeapBaseLoadedVal = LI;
+            }
+        }
+    }
+
+    // Load the global values if they are not already loaded
+    if (!SbxHeapRangeLoadedVal) {
+        SbxHeapRangeLoadedVal = Builder->CreateAlignedLoad(
+                llvm::Type::getInt32Ty(M_->getContext()), sbxHeapRange, llvm::Align(8), false);
+    }
+    if (!SbxHeapBaseLoadedVal) {
+        SbxHeapBaseLoadedVal = Builder->CreateAlignedLoad(
+                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
+    }
+
+    // Perform the address calculations
+    Value *OffsetValWithHeap = Builder->CreateAdd(SbxHeapBaseLoadedVal, Address);
+
+    // Extend sbxHeapRange to i64 and add MaxIndex
+    Value *SbxHeapRangeLoadedVal64 = Builder->CreateZExt(SbxHeapRangeLoadedVal, llvm::Type::getInt64Ty(M_->getContext()));
+    Value *SbxHeapRangePlusMaxIndex = Builder->CreateAdd(SbxHeapRangeLoadedVal64, MaxIndex, "SbxHeapRangePlusMaxIndex");
+
+    // Perform the condition check
+    Value *ConditionVal = Builder->CreateICmpULT(OffsetValWithHeap, SbxHeapRangePlusMaxIndex, "SandMem.TaintCheck");
+
+    // Get the current basic block and create the necessary new blocks
+    BasicBlock *CheckSanityBB = BasicBlock::Create(M_->getContext(), "checkSanityForLoop", CurFn);
+    BasicBlock *TrapBB = BasicBlock::Create(M_->getContext(), "trap", CurFn);
+    BasicBlock *PreheaderBB = BasicBlock::Create(M_->getContext(), "for.body.lr.ph", CurFn);
+
+    // Set up the trap block
+    IRBuilder<> TrapBuilder(TrapBB);
+    Function *TrapFn = Intrinsic::getDeclaration(M_, Intrinsic::trap);
+    TrapBuilder.CreateCall(TrapFn);
+    TrapBuilder.CreateUnreachable();
+
+    // Original branch from the condition check
+    BasicBlock *OriginalTarget = nullptr;
+    Instruction *Term = CurrentBB->getTerminator();
+    if (auto *Br = dyn_cast<BranchInst>(Term)) {
+        if (Br->isConditional()) {
+            OriginalTarget = Br->getSuccessor(0);
+            Br->setSuccessor(0, CheckSanityBB); // Redirect the true branch to the new block
+        }
+    }
+
+    // In the checkSanityForLoop block, check the condition and branch accordingly
+    Builder->SetInsertPoint(CheckSanityBB);
+    Builder->CreateCondBr(ConditionVal, PreheaderBB, TrapBB);
+
+    // In the preheader, continue to the original loop body
+    Builder->SetInsertPoint(PreheaderBB);
+    Builder->CreateBr(OriginalTarget);
+
+    // Return the first inserted instruction, which is OffsetValWithHeap
+    return OffsetValWithHeap;
+}
+
 CallInst *IRBuilderBase::CreateFAddReduce(Value *Acc, Value *Src) {
   Module *M = GetInsertBlock()->getParent()->getParent();
   Value *Ops[] = {Acc, Src};
@@ -548,6 +634,11 @@ CallInst *IRBuilderBase::FetchSbxHeapBound(Module* M){
 CallInst *IRBuilderBase::VerifyIndexableAddressFunc(Module* M, Value *Address, Value *MaxIndex){
   //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
   return VerifyIndexableAddress(this, M, Address, MaxIndex);
+}
+
+Value *IRBuilderBase::Verify_Wasm_ptr(Module* M, llvm::Function* CurFn, Value *Address,Value *MaxIndex){
+  //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
+  return EmitWASM_SBX_sanity_check(this, M,CurFn, Address, MaxIndex);
 }
 
 CallInst *IRBuilderBase::CreateIntMinReduce(Value *Src, bool IsSigned) {

@@ -4305,17 +4305,42 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
     }
 
-    if (LoopExpr)
-    {
+    if (LoopExpr) {
       // Create a constant value of -1 (as a placeholder for MaxIdx)
       llvm::Value *MaxIdx = Idx;
 
       // Convert the pointer (Addr) to an i64 integer type
       llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
 
-      // Create the sanity check call with the address and MaxIdx
-      Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+      // Check if the Address is an instruction to find the current basic block
+      if (llvm::Instruction *AddressInst = llvm::dyn_cast<llvm::Instruction>(Address)) {
+        // Get the basic block it belongs to
+        llvm::BasicBlock *CurrentBB = AddressInst->getParent();
+
+        // Check if there's a duplicate of the call in the current basic block
+        bool IsDuplicate = false;
+        for (llvm::Instruction &I : *CurrentBB) {
+          // Check if the instruction is a call instruction
+          if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+            // Check if the called function matches
+            if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+              // Check if the operands match
+              if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
+                IsDuplicate = true;
+                break;
+              }
+            }
+          }
+        }
+
+        // Only insert the call if it's not a duplicate
+        if (!IsDuplicate) {
+          Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+        }
+      }
     }
+
+
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
     LValue LV = LValue::MakeVectorElt(Addr, Idx, E->getBase()->getType(),
@@ -4342,30 +4367,49 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     }
 
     if (LoopExpr) {
-     // Generate the LLVM IR for evaluating LoopExpr
-     llvm::Value *LoopBoundValue = EmitScalarExpr(LoopExpr);
+      // Generate the LLVM IR for evaluating LoopExpr
+      llvm::Value *LoopBoundValue = EmitScalarExpr(LoopExpr);
 
-     llvm::Type *Int64Ty = llvm::Type::getInt64Ty(CGM.getLLVMContext());
-     LValueBaseInfo BaseInfo;
-     TBAAAccessInfo TBAAInfo;
+      llvm::Type *Int64Ty = llvm::Type::getInt64Ty(CGM.getLLVMContext());
+      LValueBaseInfo BaseInfo;
+      TBAAAccessInfo TBAAInfo;
 
-     // Check if LoopBoundValue is a pointer, and if so, load the value it points to
-     if (LoopBoundValue->getType()->isPointerTy()) {
+      // Check if LoopBoundValue is a pointer, and if so, load the value it points to
+      if (LoopBoundValue->getType()->isPointerTy()) {
         // Emit the address with alignment from the LoopExpr
         Address const Addr = EmitPointerWithAlignment(LoopExpr, &BaseInfo, &TBAAInfo);
-        LoopBoundValue = Builder.CreateLoad(Addr, false, "loopbound.load");
-     } else if (LoopBoundValue->getType() != Int64Ty) {
+        LoopBoundValue = Builder.CreateLoad(Addr, "loopbound.load");
+      } else if (LoopBoundValue->getType() != Int64Ty) {
         // Cast the value to Int64 if it's not already
         LoopBoundValue = Builder.CreateIntCast(LoopBoundValue, Int64Ty, true, "loopbound.cast");
-     }
+      }
 
-     // Assign the loaded or cast value to MaxIdx
-     llvm::Value *MaxIdx = Idx;
-     // Convert the pointer (Addr) to an i64 integer type
-     llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
+      // Assign the loaded or cast value to MaxIdx
+      llvm::Value *MaxIdx = LoopBoundValue;
 
-     // Create the sanity check call with the address and MaxIdx
-     Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+      // Convert the pointer (Addr) to an i64 integer type
+      llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), Int64Ty);
+
+      // Get the current basic block
+      llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
+
+      // Check if there's a duplicate of the call in the current basic block
+      bool IsDuplicate = false;
+      for (llvm::Instruction &I : *CurrentBB) {
+        if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+          if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+            if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
+              IsDuplicate = true;
+              break;
+            }
+          }
+        }
+      }
+
+      // Only insert the call if it's not a duplicate
+      if (!IsDuplicate) {
+        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+      }
     }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
@@ -4409,8 +4453,26 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       // Convert the pointer (Addr) to an i64 integer type
       llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
 
-      // Create the sanity check call with the address and MaxIdx
-      Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+      // Get the current basic block
+      llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
+
+      // Check if there's a duplicate of the call in the current basic block
+      bool IsDuplicate = false;
+      for (llvm::Instruction &I : *CurrentBB) {
+        if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+          if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+            if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
+              IsDuplicate = true;
+              break;
+            }
+          }
+        }
+      }
+
+      // Only insert the call if it's not a duplicate
+      if (!IsDuplicate) {
+        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+      }
     }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
@@ -4457,14 +4519,32 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     }
 
     if (LoopExpr) {
-      // Create a constant value of -1 (as a placeholder for MaxIdx)
+      // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 
       // Convert the pointer (Addr) to an i64 integer type
       llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
 
-      // Create the sanity check call with the address and MaxIdx
-      Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+      // Get the current basic block
+      llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
+
+      // Check for duplicates of the same call in the current basic block
+      bool IsDuplicate = false;
+      for (llvm::Instruction &I : *CurrentBB) {
+        if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+          if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+            if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
+              IsDuplicate = true;
+              break;
+            }
+          }
+        }
+      }
+
+      // If no duplicate found, insert the call
+      if (!IsDuplicate) {
+        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+      }
     }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
@@ -4521,14 +4601,32 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     EmitDynamicNonNullCheck(Addr, BaseTy);
 
     if (LoopExpr) {
-      // Create a constant value of -1 (as a placeholder for MaxIdx)
+      // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 
       // Convert the pointer (Addr) to an i64 integer type
       llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
 
-      // Create the sanity check call with the address and MaxIdx
-      Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+      // Get the current basic block
+      llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
+
+      // Check for duplicates of the same call in the current basic block
+      bool IsDuplicate = false;
+      for (llvm::Instruction &I : *CurrentBB) {
+        if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+          if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+            if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
+              IsDuplicate = true;
+              break;
+            }
+          }
+        }
+      }
+
+      // If no duplicate found, insert the call
+      if (!IsDuplicate) {
+        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+      }
     }
 
     // do tainted pointer crap only if not in loops, else let the CGLoop module handle it
