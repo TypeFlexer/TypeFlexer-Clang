@@ -176,6 +176,9 @@ void IDFCalculatorBase<NodeTy, IsPostDom>::calculate(
       auto DoWork = [&](NodeTy *Succ) {
         DomTreeNodeBase<NodeTy> *SuccNode = DT.getNode(Succ);
 
+        if (!SuccNode)
+          return;
+
         const unsigned SuccLevel = SuccNode->getLevel();
         if (SuccLevel > RootLevel)
           return;

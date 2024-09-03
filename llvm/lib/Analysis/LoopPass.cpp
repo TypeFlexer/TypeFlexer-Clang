@@ -26,6 +26,8 @@
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/IR/IRBuilder.h"
+
 using namespace llvm;
 
 #define DEBUG_TYPE "loop-pass-manager"
@@ -136,6 +138,8 @@ bool LPPassManager::runOnFunction(Function &F) {
   DominatorTree *DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
 #endif
   bool Changed = false;
+  if (F.getName().str() == "quantum_measure")
+    int a = 10;
 
   // Collect inherited analysis from Module level pass manager.
   populateInheritedAnalysis(TPM->activeStack);
@@ -279,6 +283,39 @@ bool LPPassManager::runOnFunction(Function &F) {
 
     // Pop the loop from queue after running all passes.
     LQ.pop_back();
+  }
+
+  std::vector<Instruction *> InstructionsToErase;
+  if (F.getName().str() == "quantum_measure")
+    int a = 10;
+
+  for (BasicBlock &BB : F) { // Iterate over all basic blocks in the function
+    for (Instruction &I : BB) {
+      if (auto *Call = dyn_cast<CallInst>(&I)) {
+        if (Function *Callee = Call->getCalledFunction()) {
+          if (Callee->getName() == "c_licm_verify_addr") {
+            CallInst* callInt = Call;
+            Value *Arg0 = callInt->getArgOperand(0);
+            Value *Arg1 = callInt->getArgOperand(1);
+
+            auto CurBB = callInt->getParent();
+            llvm::IRBuilder<> Builder(CurBB->getTerminator());
+            llvm::Value *SanityCheck = Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(),
+                                                                           CurBB, &F, // Pass the function
+                                                                           Arg0, Arg1);
+            auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
+            SanityCheckInst->moveAfter(callInt);
+            Call->replaceAllUsesWith(UndefValue::get(Call->getType()));
+            InstructionsToErase.push_back(Call);
+          }
+        }
+      }
+    }
+
+    for (Instruction *I : InstructionsToErase) {
+      I->eraseFromParent();
+    }
+    InstructionsToErase.clear();
   }
 
   // Finalization

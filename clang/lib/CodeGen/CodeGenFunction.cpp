@@ -988,13 +988,13 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
         if (sbxHeapBound) {
           Address *key_addr = new Address(sbxHeapBound, CGM.getPointerAlign());
           llvm::Value *HeapBoundVal = Builder.FetchSbxHeapBound(&CGM.getModule());
-          llvm::Value *HeapBaseVal = Builder.FetchSbxHeapAddress();
-          auto HeapRangeInst = dyn_cast<llvm::Instruction>(HeapBoundVal);
-          HeapRangeInst->setParent(EntryBB);
-          llvm::Value *HeapRange = Builder.CreateSub(HeapBoundVal, HeapBaseVal);
-          // bitcast to i32
-          llvm::Value *HeapRange32 = Builder.CreateTrunc(HeapRange, Int32Ty);
-          Builder.CreateStore(HeapRange32, *key_addr);
+//          llvm::Value *HeapBaseVal = Builder.FetchSbxHeapAddress();
+//          auto HeapRangeInst = dyn_cast<llvm::Instruction>(HeapBoundVal);
+//          HeapRangeInst->setParent(EntryBB);
+//          llvm::Value *HeapRange = Builder.CreateSub(HeapBoundVal, HeapBaseVal);
+//          // bitcast to i32
+//          llvm::Value *HeapRange32 = Builder.CreateTrunc(HeapRange, Int32Ty);
+          Builder.CreateStore(HeapBoundVal, *key_addr);
         }
     }
     else {
@@ -1010,13 +1010,13 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
           Address *key_addr = new Address(sbxHeapBound, CGM.getPointerAlign());
           llvm::Value *HeapRangeVal =
               Builder.FetchSbxHeapBound(&CGM.getModule());
-          llvm::Value *HeapBaseVal = Builder.FetchSbxHeapAddress();
-          auto HeapRangeInst = dyn_cast<llvm::Instruction>(HeapRangeVal);
-          HeapRangeInst->setParent(EntryBB);
-          llvm::Value *HeapRange = Builder.CreateSub(HeapRangeVal, HeapBaseVal);
-          // bitcast to i32
-          llvm::Value *HeapRange32 = Builder.CreateTrunc(HeapRange, Int32Ty);
-          llvm::StoreInst *store = Builder.CreateStore(HeapRange32, *key_addr);
+//          llvm::Value *HeapBaseVal = Builder.FetchSbxHeapAddress();
+//          auto HeapRangeInst = dyn_cast<llvm::Instruction>(HeapRangeVal);
+//          HeapRangeInst->setParent(EntryBB);
+//          llvm::Value *HeapRange = Builder.CreateSub(HeapRangeVal, HeapBaseVal);
+//          // bitcast to i32
+//          llvm::Value *HeapRange32 = Builder.CreateTrunc(HeapRange, Int32Ty);
+          llvm::StoreInst *store = Builder.CreateStore(HeapRangeVal, *key_addr);
           }
         }
       }

@@ -2032,6 +2032,8 @@ llvm::removeAllNonTerminatorAndEHPadInstructions(BasicBlock *BB) {
 unsigned llvm::changeToUnreachable(Instruction *I, bool UseLLVMTrap,
                                    bool PreserveLCSSA, DomTreeUpdater *DTU,
                                    MemorySSAUpdater *MSSAU) {
+  if (!I)
+    return 0;
   BasicBlock *BB = I->getParent();
 
   if (MSSAU)

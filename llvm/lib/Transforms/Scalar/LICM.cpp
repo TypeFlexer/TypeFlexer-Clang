@@ -87,6 +87,9 @@
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 #include <algorithm>
 #include <utility>
+#include <unordered_map>
+#include <unordered_set>
+
 using namespace llvm;
 
 #define DEBUG_TYPE "licm"
@@ -339,31 +342,261 @@ llvm::SinkAndHoistLICMFlags::SinkAndHoistLICMFlags(
       }
 }
 // Function to recursively duplicate instructions outside the loop
-llvm::Value* DuplicateInstructionsOutsideLoop(llvm::Value *V, llvm::IRBuilder<> &Builder, llvm::Loop *L) {
-  if (llvm::Instruction *Inst = dyn_cast<llvm::Instruction>(V)) {
-    // If the instruction is inside the loop, duplicate it outside
-    if (L->contains(Inst->getParent())) {
-      // Recursively duplicate the operands first
-      llvm::SmallVector<llvm::Value*, 8> Operands(Inst->operand_values());
-      llvm::SmallVector<llvm::Value*, 8> NewOperands;
+llvm::Value* DuplicateInstructionsOutsideLoop(
+        llvm::Value *V,
+        llvm::IRBuilder<> &Builder,
+        llvm::Loop *L,
+        llvm::BasicBlock *Preheader,
+        llvm::DominatorTree *DT) {
 
-      for (llvm::Value *Operand : Operands) {
-        NewOperands.push_back(DuplicateInstructionsOutsideLoop(Operand, Builder, L));
+    if (llvm::Instruction *Inst = dyn_cast<llvm::Instruction>(V)) {
+        // Handle PHI nodes: take one of the incoming paths
+        if (llvm::PHINode *Phi = dyn_cast<llvm::PHINode>(Inst)) {
+            // Take one incoming value (you might choose the first one, for simplicity)
+            llvm::Value *IncomingValue = Phi->getIncomingValue(0);
+            return DuplicateInstructionsOutsideLoop(IncomingValue, Builder, L, Preheader, DT);
+        }
+
+        // Check if it's a load instruction
+        if (llvm::LoadInst *Load = dyn_cast<llvm::LoadInst>(Inst)) {
+            // If the load instruction is loading from a global variable, duplicate it and stop
+            if (llvm::GlobalVariable *GV = dyn_cast<llvm::GlobalVariable>(Load->getPointerOperand())) {
+                llvm::Instruction *NewLoad = Load->clone();
+                Builder.Insert(NewLoad);
+                return NewLoad;
+            }
+        }
+
+        // Check if the instruction is inside the loop or does not dominate the preheader
+        if (L->contains(Inst->getParent()) || !DT->dominates(Inst, Preheader)) {
+            // Recursively duplicate the operands first
+            llvm::SmallVector<llvm::Value*, 8> Operands(Inst->operand_values());
+            llvm::SmallVector<llvm::Value*, 8> NewOperands;
+
+            for (llvm::Value *Operand : Operands) {
+                NewOperands.push_back(DuplicateInstructionsOutsideLoop(Operand, Builder, L, Preheader, DT));
+            }
+
+            // Create the new instruction using the duplicated operands
+            llvm::Instruction *NewInst = Inst->clone();
+            for (unsigned i = 0; i < NewOperands.size(); ++i) {
+                NewInst->setOperand(i, NewOperands[i]);
+            }
+
+            // Insert the new instruction
+            Builder.Insert(NewInst);
+
+            return NewInst;
+        }
+    }
+    return V;  // If it's not an instruction or already dominates the preheader, return it as is
+}
+
+
+llvm::Value *DuplicateIndexSubexpressionWithMaxRanges(
+        llvm::IRBuilder<> &Builder,
+        llvm::Value *IndexSubexpression,
+        const std::map<llvm::PHINode *, llvm::Value *> &MaxRanges,
+        const llvm::Loop *L,
+        llvm::BasicBlock *Preheader,
+        llvm::DominatorTree *DT) {
+
+  // To avoid infinite loops, maintain a map of already cloned instructions.
+  std::unordered_map<llvm::Instruction *, llvm::Instruction *> ClonedMap;
+
+  std::function<llvm::Value *(llvm::Value *)> ProcessInstruction = [&](llvm::Value *V) -> llvm::Value * {
+      if (llvm::Instruction *Inst = llvm::dyn_cast<llvm::Instruction>(V)) {
+
+        // Stop recursion if instruction is outside the loop, a load from a global variable,
+        // a load/GEP on one of the arguments, or already in the Preheader.
+        if (!L->contains(Inst->getParent()) || llvm::isa<llvm::Constant>(Inst)) {
+          if (ClonedMap.count(Inst)) {
+            return ClonedMap[Inst];
+          }
+          llvm::Instruction *ClonedInst = Inst->clone();
+          Builder.Insert(ClonedInst);
+          ClonedMap[Inst] = ClonedInst;
+          return ClonedInst;
+        }
+
+        // If it's a PHINode, process its incoming values without cloning the PHI itself.
+        if (llvm::PHINode *Phi = llvm::dyn_cast<llvm::PHINode>(Inst)) {
+          llvm::Value *MaxRangeValue = nullptr;
+
+          // Iterate through all entries in MaxRanges to find a matching PHI node
+          for (const auto &Entry : MaxRanges) {
+              llvm::PHINode *MaxRangePhi = Entry.first;
+              llvm::Value *MaxRangeCandidate = Entry.second;
+
+              // Compare operands of the PHI node with those of MaxRangePhi
+              bool OperandsMatch = true;
+              for (unsigned i = 0; i < MaxRangePhi->getNumIncomingValues(); ++i) {
+                  if (MaxRangePhi->getIncomingValue(i) != Phi->getIncomingValue(i)) {
+                      OperandsMatch = false;
+                      break;
+                  }
+              }
+
+              // If operands match, we've found the corresponding max range
+              if (OperandsMatch) {
+                  MaxRangeValue = MaxRangeCandidate;
+                  break;
+              }
+          }
+
+          // Return the max range value if found
+          if (MaxRangeValue) {
+              return MaxRangeValue;
+          }
+
+          // If no max range is found (which should not happen), return the first incoming value
+          return Phi->getIncomingValue(0);
+        }
+
+
+        // Handle global loads.
+        if (llvm::LoadInst *Load = llvm::dyn_cast<llvm::LoadInst>(Inst)) {
+          if (llvm::GlobalVariable *GV = llvm::dyn_cast<llvm::GlobalVariable>(Load->getPointerOperand())) {
+            return Load; // End recursion for global variables.
+          }
+        }
+
+        // Recursively process all operands.
+        llvm::SmallVector<llvm::Value *, 8> NewOperands;
+        for (llvm::Value *Operand : Inst->operands()) {
+          llvm::Value *ProcessedOperand = ProcessInstruction(Operand);
+
+          // Ensure the operand dominates the insertion point.
+          if (llvm::Instruction *OperandInst = llvm::dyn_cast<llvm::Instruction>(ProcessedOperand)) {
+            llvm::Instruction *InsertionPoint = &*Builder.GetInsertPoint();
+            if (!DT->dominates(OperandInst, InsertionPoint)) {
+              // Recursively insert dependencies so that the operand dominates the instruction.
+              llvm::Instruction *ClonedOpInst = OperandInst->clone();
+              Builder.Insert(ClonedOpInst);
+              ClonedMap[OperandInst] = ClonedOpInst;
+              ProcessInstruction(ClonedOpInst);
+              ProcessedOperand = ClonedOpInst;
+            }
+          }
+
+          NewOperands.push_back(ProcessedOperand);
+        }
+
+        // Clone the instruction with the processed operands.
+        llvm::Instruction *NewInst = Inst->clone();
+        for (unsigned i = 0; i < NewOperands.size(); ++i) {
+          NewInst->setOperand(i, NewOperands[i]);
+        }
+
+        // Insert the new instruction into the Preheader.
+        Builder.Insert(NewInst);
+        ClonedMap[Inst] = NewInst;
+        return NewInst;
       }
 
-      // Create the new instruction using the duplicated operands
-      llvm::Instruction *NewInst = Inst->clone();
-      for (unsigned i = 0; i < NewOperands.size(); ++i) {
-        NewInst->setOperand(i, NewOperands[i]);
+      return V; // Return the original value if it's not an instruction.
+  };
+
+  return ProcessInstruction(IndexSubexpression);
+}
+
+std::vector<llvm::Instruction *> FindForwardReferencedInstructions(llvm::BasicBlock *BB, llvm::DominatorTree *DT) {
+  std::vector<llvm::Instruction *> ForwardReferencedInsts;
+
+  // Iterate over each instruction in the block
+  for (llvm::Instruction &Inst : *BB) {
+    // Check each operand of the instruction
+    for (llvm::Value *Operand : Inst.operands()) {
+      if (llvm::Instruction *OpInst = llvm::dyn_cast<llvm::Instruction>(Operand)) {
+        // Operand must be either in the same block before the current instruction
+        // or must dominate the current block
+        if (OpInst->getParent() != BB || OpInst->comesBefore(&Inst)) {
+          if (!DT->dominates(OpInst, &Inst)) {
+            ForwardReferencedInsts.push_back(&Inst);
+            break;
+          }
+        }
+      } else if (llvm::PHINode *Phi = llvm::dyn_cast<llvm::PHINode>(Operand)) {
+        // Special handling for PHI nodes: ensure that each incoming value dominates the PHI
+        for (unsigned i = 0; i < Phi->getNumIncomingValues(); ++i) {
+          llvm::Value *IncomingValue = Phi->getIncomingValue(i);
+          llvm::BasicBlock *IncomingBlock = Phi->getIncomingBlock(i);
+          if (llvm::Instruction *IncomingInst = llvm::dyn_cast<llvm::Instruction>(IncomingValue)) {
+            if (!DT->dominates(IncomingInst, IncomingBlock)) {
+              ForwardReferencedInsts.push_back(&Inst);
+              break;
+            }
+          }
+        }
       }
-
-      // Insert the new instruction
-      Builder.Insert(NewInst);
-
-      return NewInst;
     }
   }
-  return V;  // If it's not an instruction or already outside the loop, return it as is
+
+  return ForwardReferencedInsts;
+}
+
+static llvm::Value *CloneDependenciesUpwards(
+        llvm::IRBuilder<> &Builder,
+        llvm::Value *V,
+        llvm::DominatorTree *DT,
+        llvm::BasicBlock *Preheader) {
+
+    std::unordered_map<llvm::Instruction *, llvm::Instruction *> ClonedMap;
+
+    std::function<llvm::Value *(llvm::Value *)> ProcessInstruction = [&](llvm::Value *Operand) -> llvm::Value * {
+        if (llvm::Instruction *Inst = llvm::dyn_cast<llvm::Instruction>(Operand)) {
+            if (ClonedMap.count(Inst)) {
+                return ClonedMap[Inst];
+            }
+
+            // If the instruction is outside the Preheader and does not dominate, clone it.
+            if (!DT->dominates(Inst->getParent(), Builder.GetInsertBlock())) {
+                llvm::SmallVector<llvm::Value *, 8> NewOperands;
+                for (llvm::Value *Op : Inst->operands()) {
+                    NewOperands.push_back(ProcessInstruction(Op));
+                }
+
+                // Clone the instruction with its dependencies.
+                llvm::Instruction *NewInst = Inst->clone();
+                for (unsigned i = 0; i < NewOperands.size(); ++i) {
+                    NewInst->setOperand(i, NewOperands[i]);
+                }
+
+                Builder.Insert(NewInst);
+                ClonedMap[Inst] = NewInst;
+                return NewInst;
+            }
+
+            return Inst;
+        }
+
+        return Operand; // If it's not an instruction, return the original value.
+    };
+
+    return ProcessInstruction(V);
+}
+
+llvm::BasicBlock *getOutermostPreheader(llvm::Loop *L, llvm::DominatorTree *DT) {
+    llvm::Loop *CurrentLoop = L;
+    llvm::BasicBlock *OutermostPreheader = nullptr;
+
+    // Walk up through parent loops to find the outermost preheader
+    while (CurrentLoop) {
+        llvm::BasicBlock *Preheader = CurrentLoop->getLoopPreheader();
+        if (!Preheader)
+            break;
+
+        // If the preheader's name starts with "for.cond", consider it the outermost preheader
+        if (Preheader->getName().startswith("for.cond")) {
+            OutermostPreheader = Preheader;
+        }
+
+        // Move to the parent loop
+        CurrentLoop = CurrentLoop->getParentLoop();
+    }
+
+    // If we found an outermost preheader, return it; otherwise, return the original loop's preheader
+    return OutermostPreheader ? OutermostPreheader : L->getLoopPreheader();
 }
 
 /// Hoist expressions out of the specified loop. Note, alias info for inner
@@ -403,314 +636,507 @@ bool LoopInvariantCodeMotion::runOnLoop(
   SafetyInfo.computeLoopSafetyInfo(L);
 
   BasicBlock *Preheader = L->getLoopPreheader();
-  BasicBlock *ForBodyBlock = nullptr;
+  BasicBlock* OptimalPreheader = Preheader;
+  if (L->getLoopDepth() >= 2) {
+      OptimalPreheader = getOutermostPreheader(L, DT);
+  }
+
+
   Instruction *VerifyAddrCall = nullptr;
 
-  // Traverse the loop's basic blocks to find the for.body block and the c_licm_verify_addr call
-  for (BasicBlock *BB: L->blocks()) {
-    if (BB->getName().startswith("for.body")) {
-      ForBodyBlock = BB;
-      for (Instruction &I: *BB) {
-        if (auto *Call = dyn_cast<CallInst>(&I)) {
-          if (Function *Callee = Call->getCalledFunction()) {
-            if (Callee->getName() == "c_licm_verify_addr") {
-              VerifyAddrCall = Call;
-              break;
-            }
-          }
-        }
-      }
-    }
-  }
+    // Traverse the loop's basic blocks to find the for.body block and track c_licm_verify_addr calls
+    std::map<std::pair<Value *, Value *>, CallInst *> VerifyAddrCalls;
+    llvm::SmallVector<Instruction *, 8> ToErase;
+    bool instrumentTaintSanity = true;
 
-// If the call was found, move it to the preheader and replace the second argument
-  if (VerifyAddrCall && ForBodyBlock && Preheader) {
-    // Get the loop's induction variable (assumes canonical form)
-    PHINode *IndVar = L->getCanonicalInductionVariable();
-    PHINode *DetectedIndVar = nullptr;  // Store the detected induction variable during traversal
+    if (CurFn->getName().str() == "LBM_storeVelocityField")
+        int a = 10;
+    if (instrumentTaintSanity)
+    {
+        for (BasicBlock *BB : L->blocks()) {
+            for (Instruction &I : *BB) {
+                if (auto *Call = dyn_cast<CallInst>(&I)) {
+                    if (Function *Callee = Call->getCalledFunction()) {
+                        if (Callee->getName() == "c_licm_verify_addr") {
+                            // Get the arguments of the c_licm_verify_addr call
+                            Value *Arg0 = Call->getArgOperand(0);
+                            Value *Arg1 = Call->getArgOperand(1);
 
-    if (IndVar) {
-      // Try to get the loop bound using SCEV
-      const SCEV *LoopBoundSCEV = SE->getBackedgeTakenCount(L);
-      Value *LoopBound = nullptr;
+                            // Create a key using the pair of arguments
+                            auto Key = std::make_pair(Arg0, Arg1);
 
-      if (!isa<SCEVCouldNotCompute>(LoopBoundSCEV)) {
-        // If SCEV was able to compute the loop bound
-        SCEVExpander Expander(*SE, Preheader->getModule()->getDataLayout(), "loopbound");
-        IRBuilder<> Builder(Preheader->getTerminator());
-
-        BasicBlock *IncBlock = L->getLoopLatch();
-        if (IncBlock) {
-          Instruction *TermInst = IncBlock->getTerminator();
-          if (BranchInst *BI = dyn_cast<BranchInst>(TermInst)) {
-            if (BI->isConditional()) {
-              if (ICmpInst *Cmp = dyn_cast<ICmpInst>(BI->getCondition())) {
-                // Traverse both operands of the cmp instruction
-                Value *Operand0 = Cmp->getOperand(0);
-                Value *Operand1 = Cmp->getOperand(1);
-
-                // Function to recursively follow the operand chain
-                auto FollowOperandChain = [&](Value *Op) -> Value* {
-                    while (true) {
-                      if (Instruction *Inst = dyn_cast<Instruction>(Op)) {
-                        if (PHINode *Phi = dyn_cast<PHINode>(Inst)) {
-                          DetectedIndVar = Phi;  // Store the induction variable
-                          return nullptr;  // Ignore it and stop further traversal
-                        } else if (!L->contains(Inst)) {
-                          return Inst;  // Found an instruction outside the loop
-                        } else if (Inst->getNumOperands() > 0) {
-                          Op = Inst->getOperand(0);  // Move to the next operand
-                        } else {
-                          break;  // No more operands to follow
+                            // Check if this combination of arguments has been seen before
+                            if (VerifyAddrCalls.count(Key)) {
+                                // If a duplicate is found, mark the current call for deletion
+                                ToErase.push_back(Call);
+                            } else {
+                                // Otherwise, record this call
+                                VerifyAddrCalls[Key] = Call;
+                            }
                         }
-                      } else {
-                        // If Op is not an instruction, it could be the bound variable
-                        return Op;
-                      }
                     }
-                    return nullptr;
-                };
-
-                // Follow Operand0 and Operand1
-                Value *BoundFromOperand0 = FollowOperandChain(Operand0);
-                Value *BoundFromOperand1 = FollowOperandChain(Operand1);
-
-                // Choose the operand that led to a valid instruction outside the loop
-                if (BoundFromOperand0 && !isa<PHINode>(BoundFromOperand0)) {
-                  LoopBound = BoundFromOperand0;
-                } else if (BoundFromOperand1 && !isa<PHINode>(BoundFromOperand1)) {
-                  LoopBound = BoundFromOperand1;
                 }
-              }
             }
-          }
         }
-        // If we successfully obtained the loop bound, proceed with the transformation
-        if (LoopBound) {
-          Value *CallIndVar = nullptr;
-          // Check if VerifyAddrCall is valid and has at least one operand
-          if (VerifyAddrCall && VerifyAddrCall->getNumOperands() > 0) {
-            // Safely access the first operand
-            CallIndVar = VerifyAddrCall->getOperand(0);
 
-            // If there is more than one operand, access the second one
-            if (VerifyAddrCall->getNumOperands() > 1) {
-              CallIndVar = VerifyAddrCall->getOperand(1);
-            }
-          } else {
-            llvm::errs() << "Error: VerifyAddrCall is null or has no operands.\n";
-            goto skip_instrumentation;
-          }
-
-          // Traverse upwards from CallIndVar to see if it matches DetectedIndVar
-          auto TraverseUpwardsToFindPhi = [&](Value *V) -> PHINode * {
-              while (Instruction *Inst = dyn_cast<Instruction>(V)) {
-                if (PHINode *Phi = dyn_cast<PHINode>(Inst)) {
-                  return Phi;  // Found the PHI node
-                }
-                if (Inst->getNumOperands() > 0) {
-                  V = Inst->getOperand(0);  // Move to the next operand
-                } else {
-                  break;  // No more operands to follow
-                }
-              }
-              return nullptr;
-          };
-
-          PHINode *CallIndVarPhi = TraverseUpwardsToFindPhi(CallIndVar);
-          if (CallIndVarPhi && CallIndVarPhi == DetectedIndVar) {
-            // Get the first argument of the original call
-            Value *Address = VerifyAddrCall->getOperand(0);
-
-            // Check if Address needs to be duplicated outside the loop
-            if (Instruction *AddrInst = dyn_cast<Instruction>(Address)) {
-              if (L->contains(AddrInst)) {
-                // Duplicate the address-related instructions outside the loop
-                llvm::Value *DuplicatedAddress = DuplicateInstructionsOutsideLoop(Address, Builder, L);
-                Address = DuplicatedAddress;
-              }
-            }
-
-            // If LoopBound is of type i32, zero-extend it to i64
-            if (LoopBound->getType()->isIntegerTy(32)) {
-              LoopBound = Builder.CreateZExt(LoopBound, Builder.getInt64Ty(), "loopbound.zext");
-            }
-
-            // Create the new call using the VerifyIndexableAddressFunc method
-            llvm::Value *SanityCheck = Builder.VerifyIndexableAddressFunc(Preheader->getModule(), Address, LoopBound);
-            auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
-
-            // Move the SanityCheckInst to the preheader
-            SanityCheckInst->moveBefore(Preheader->getTerminator());
-
-            // Remove the original VerifyAddrCall from the for.body block
-            eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
-            VerifyAddrCall = nullptr;
-          }
+        // Now erase all the redundant instructions after the loop
+        for (Instruction *I : ToErase) {
+            I->replaceAllUsesWith(UndefValue::get(I->getType()));
+            eraseInstruction(*I, SafetyInfo, CurAST.get(), MSSAU.get());
         }
-      }
-      else {
-        // Fallback: Traverse backwards from the loop increment block to find the loop bound load
-        BasicBlock *IncBlock = L->getLoopLatch();
-        if (IncBlock) {
-          Instruction *TermInst = IncBlock->getTerminator();
-          if (BranchInst *BI = dyn_cast<BranchInst>(TermInst)) {
-            if (BI->isConditional()) {
-              if (ICmpInst *Cmp = dyn_cast<ICmpInst>(BI->getCondition())) {
-                // Traverse both operands of the cmp instruction
-                Value *Operand0 = Cmp->getOperand(0);
-                Value *Operand1 = Cmp->getOperand(1);
 
-                // Function to recursively follow the operand chain
-                auto FollowOperandChain = [&](Value *Op) -> Value * {
-                    while (Instruction *Inst = dyn_cast<Instruction>(Op)) {
-                      if (PHINode *Phi = dyn_cast<PHINode>(Inst)) {
-                        DetectedIndVar = Phi;  // Store the induction variable
-                        return nullptr;  // Ignore it and stop further traversal
-                      } else if (!L->contains(Inst)) {
-                        return Inst;  // Found an instruction outside the loop
-                      } else if (Inst->getNumOperands() > 0) {
-                        Op = Inst->getOperand(0);  // Move to the next operand
-                      } else {
-                        break;  // No more operands to follow
-                      }
+        for (auto VerifyAddrCallPair : VerifyAddrCalls)
+        {
+            VerifyAddrCall = VerifyAddrCallPair.second;
+            if (VerifyAddrCall && OptimalPreheader) {
+                // Get the loop's induction variable (assumes canonical form)
+                PHINode *IndVar = L->getCanonicalInductionVariable();
+                PHINode *DetectedIndVar = nullptr;  // Store the detected induction variable during traversal
+
+                if (IndVar) {
+                    // Try to get the loop bound using SCEV
+                    const SCEV *LoopBoundSCEV = SE->getBackedgeTakenCount(L);
+                    Value *LoopBound = nullptr;
+
+                    if (!isa<SCEVCouldNotCompute>(LoopBoundSCEV)) {
+                        // If SCEV was able to compute the loop bound
+                        SCEVExpander Expander(*SE, OptimalPreheader->getModule()->getDataLayout(), "loopbound");
+                        IRBuilder<> Builder(OptimalPreheader->getTerminator());
+
+                        BasicBlock *IncBlock = L->getLoopLatch();
+                        if (IncBlock) {
+                            Instruction *TermInst = IncBlock->getTerminator();
+                            if (BranchInst *BI = dyn_cast<BranchInst>(TermInst)) {
+                                if (BI->isConditional()) {
+                                    if (ICmpInst *Cmp = dyn_cast<ICmpInst>(BI->getCondition())) {
+                                        // Traverse both operands of the cmp instruction
+                                        Value *Operand0 = Cmp->getOperand(0);
+                                        Value *Operand1 = Cmp->getOperand(1);
+
+                                        // Function to recursively follow the operand chain
+                                        auto FollowOperandChain = [&](Value *Op) -> Value* {
+                                            while (true) {
+                                                if (Instruction *Inst = dyn_cast<Instruction>(Op)) {
+                                                    if (PHINode *Phi = dyn_cast<PHINode>(Inst)) {
+                                                        DetectedIndVar = Phi;  // Store the induction variable
+                                                        return nullptr;  // Ignore it and stop further traversal
+                                                    } else if (!L->contains(Inst)) {
+                                                        return Inst;  // Found an instruction outside the loop
+                                                    } else if (Inst->getNumOperands() > 0) {
+                                                        Op = Inst->getOperand(0);  // Move to the next operand
+                                                    } else {
+                                                        break;  // No more operands to follow
+                                                    }
+                                                } else {
+                                                    // If Op is not an instruction, it could be the bound variable
+                                                    return Op;
+                                                }
+                                            }
+                                            return nullptr;
+                                        };
+
+                                        // Follow Operand0 and Operand1
+                                        Value *BoundFromOperand0 = FollowOperandChain(Operand0);
+                                        Value *BoundFromOperand1 = FollowOperandChain(Operand1);
+
+                                        // Choose the operand that led to a valid instruction outside the loop
+                                        if (BoundFromOperand0 && !isa<PHINode>(BoundFromOperand0)) {
+                                            LoopBound = BoundFromOperand0;
+                                        } else if (BoundFromOperand1 && !isa<PHINode>(BoundFromOperand1)) {
+                                            LoopBound = BoundFromOperand1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // If we successfully obtained the loop bound, proceed with the transformation
+                        if (LoopBound) {
+                            Value *CallIndVar = nullptr;
+                            // Check if VerifyAddrCall is valid and has at least one operand
+                            if (VerifyAddrCall && VerifyAddrCall->getNumOperands() > 0) {
+                                // Safely access the first operand
+                                CallIndVar = VerifyAddrCall->getOperand(0);
+
+                                // If there is more than one operand, access the second one
+                                if (VerifyAddrCall->getNumOperands() > 1) {
+                                    CallIndVar = VerifyAddrCall->getOperand(1);
+                                }
+                            } else {
+                                llvm::errs() << "Error: VerifyAddrCall is null or has no operands.\n";
+                                continue;
+                            }
+
+                            // Traverse upwards from CallIndVar to see if it matches DetectedIndVar
+                            auto TraverseUpwardsToFindPhi = [&](Value *V) -> PHINode * {
+                                while (Instruction *Inst = dyn_cast<Instruction>(V)) {
+                                    if (PHINode *Phi = dyn_cast<PHINode>(Inst)) {
+                                        return Phi;  // Found the PHI node
+                                    }
+                                    if (Inst->getNumOperands() > 0) {
+                                        V = Inst->getOperand(0);  // Move to the next operand
+                                    } else {
+                                        break;  // No more operands to follow
+                                    }
+                                }
+                                return nullptr;
+                            };
+
+                            PHINode *CallIndVarPhi = TraverseUpwardsToFindPhi(CallIndVar);
+                            if (CallIndVarPhi && CallIndVarPhi == DetectedIndVar) {
+                                // Get the first argument of the original call
+                                Value *Address = VerifyAddrCall->getOperand(0);
+
+                                // Check if Address needs to be duplicated outside the loop
+                                if (Instruction *AddrInst = dyn_cast<Instruction>(Address)) {
+                                    if (L->contains(AddrInst)) {
+                                        // Duplicate the address-related instructions outside the loop
+                                        llvm::Value *DuplicatedAddress = DuplicateInstructionsOutsideLoop(Address, Builder, L,OptimalPreheader, DT);
+                                        Address = DuplicatedAddress;
+                                    }
+                                }
+
+                                // If LoopBound is of type i32, zero-extend it to i64
+                                if (LoopBound->getType()->isIntegerTy(32)) {
+                                    LoopBound = Builder.CreateZExt(LoopBound, Builder.getInt64Ty(), "loopbound.zext");
+                                }
+
+                                // Create the new call using the VerifyIndexableAddressFunc method
+                                llvm::Value *SanityCheck = Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(), CurFn,
+                                                                                   Address, LoopBound);
+                                auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
+                                VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
+                                // Remove the original VerifyAddrCall from the for.body block
+                                eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
+
+                                VerifyAddrCall = nullptr;
+                            }
+                        }
                     }
-                    return nullptr;
-                };
+                    else {
+                        // Fallback: Traverse backwards from the loop increment block to find the loop bound load
+                        BasicBlock *IncBlock = L->getLoopLatch();
+                        if (IncBlock) {
+                            Instruction *TermInst = IncBlock->getTerminator();
+                            if (BranchInst *BI = dyn_cast<BranchInst>(TermInst)) {
+                                if (BI->isConditional()) {
+                                    if (ICmpInst *Cmp = dyn_cast<ICmpInst>(BI->getCondition())) {
+                                        // Traverse both operands of the cmp instruction
+                                        Value *Operand0 = Cmp->getOperand(0);
+                                        Value *Operand1 = Cmp->getOperand(1);
 
-                // Follow Operand0 and Operand1
-                Value *BoundFromOperand0 = FollowOperandChain(Operand0);
-                Value *BoundFromOperand1 = FollowOperandChain(Operand1);
+                                        // Function to recursively follow the operand chain
+                                        auto FollowOperandChain = [&](Value *Op) -> Value * {
+                                            while (Instruction *Inst = dyn_cast<Instruction>(Op)) {
+                                                if (PHINode *Phi = dyn_cast<PHINode>(Inst)) {
+                                                    DetectedIndVar = Phi;  // Store the induction variable
+                                                    return nullptr;  // Ignore it and stop further traversal
+                                                }
+                                                else if (isa<LoadInst>(Inst)) {
+                                                    return Inst;  // Return the load instruction
+                                                }
+                                                else if (!L->contains(Inst)) {
+                                                    return Inst;  // Found an instruction outside the loop
+                                                } else if (Inst->getNumOperands() > 0) {
+                                                    Op = Inst->getOperand(0);  // Move to the next operand
+                                                } else {
+                                                    break;  // No more operands to follow
+                                                }
+                                            }
+                                            return nullptr;
+                                        };
 
-                // Choose the operand that led to a valid instruction outside the loop
-                if (BoundFromOperand0 && !isa<PHINode>(BoundFromOperand0)) {
-                  LoopBound = BoundFromOperand0;
-                } else if (BoundFromOperand1 && !isa<PHINode>(BoundFromOperand1)) {
-                  LoopBound = BoundFromOperand1;
+                                        // Follow Operand0 and Operand1
+                                        Value *BoundFromOperand0 = FollowOperandChain(Operand0);
+                                        Value *BoundFromOperand1 = FollowOperandChain(Operand1);
+
+                                        // Choose the operand that led to a valid instruction outside the loop
+                                        if (BoundFromOperand0 && !isa<PHINode>(BoundFromOperand0)) {
+                                            LoopBound = BoundFromOperand0;
+                                        } else if (BoundFromOperand1 && !isa<PHINode>(BoundFromOperand1)) {
+                                            LoopBound = BoundFromOperand1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // If we successfully obtained the loop bound, proceed with the transformation
+                        if (LoopBound) {
+                            Value *CallIndVar = nullptr;
+                            // Check if VerifyAddrCall is valid and has at least one operand
+                            if (VerifyAddrCall && VerifyAddrCall->getNumOperands() > 0) {
+                                // Safely access the first operand
+                                CallIndVar = VerifyAddrCall->getOperand(0);
+
+                                // If there is more than one operand, access the second one
+                                if (VerifyAddrCall->getNumOperands() > 1) {
+                                    CallIndVar = VerifyAddrCall->getOperand(1);
+                                }
+
+                                // Proceed with the rest of the code, using CallIndVar...
+                            } else {
+                                llvm::errs() << "Error: VerifyAddrCall is null or has no operands.\n";
+                                continue;
+                            }
+
+                            // Traverse upwards from CallIndVar to see if it matches DetectedIndVar
+
+                            auto TraverseUpwardsToFindPhi = [&](Value *V) -> std::vector<PHINode *> {
+                                std::vector<PHINode *> PhiNodes;
+                                std::set<Value *> Visited;
+
+                                // Lambda function for DFS traversal
+                                std::function<void(Value *)> DFS = [&](Value *Val) {
+                                    // Avoid revisiting the same value
+                                    if (Visited.count(Val))
+                                        return;
+                                    Visited.insert(Val);
+
+                                    // If the value is an instruction, process it
+                                    if (Instruction *Inst = dyn_cast<Instruction>(Val)) {
+                                        // If it's a PHINode, add it to the list
+                                        if (PHINode *Phi = dyn_cast<PHINode>(Inst)) {
+                                            PhiNodes.push_back(Phi);
+                                        } else {
+                                            // Recursively traverse all operands
+                                            for (Use &Op : Inst->operands()) {
+                                                DFS(Op.get());
+                                            }
+                                        }
+                                    }
+                                };
+
+                                // Start DFS from the given value
+                                DFS(V);
+
+                                return PhiNodes;
+                            };
+                            auto FindMaxRangesForInductionVariables = [&](const std::vector<PHINode *> &PhiNodes) -> std::map<PHINode *, Value *> {
+                                std::map<PHINode *, Value *> MaxRanges;
+                                std::set<PHINode *> Visited;
+
+                                for (PHINode *Phi : PhiNodes) {
+                                    if (Visited.count(Phi))
+                                        continue;
+                                    Visited.insert(Phi);
+
+                                    // Track the max range for the current PHINode
+                                    Value *MaxRange = nullptr;
+
+                                    // Iterate over incoming values and their corresponding blocks
+                                    for (unsigned i = 0, e = Phi->getNumIncomingValues(); i != e; ++i) {
+                                        BasicBlock *IncomingBlock = Phi->getIncomingBlock(i);
+                                        Value *IncomingValue = Phi->getIncomingValue(i);
+
+                                        // Traverse the basic block backwards to find the cmp instruction
+                                        for (Instruction &Inst : *IncomingBlock) {
+                                            if (CmpInst *Cmp = dyn_cast<CmpInst>(&Inst)) {
+                                                // Check if the cmp instruction uses the induction variable
+                                                if (Cmp->getOperand(0) == IncomingValue || Cmp->getOperand(1) == IncomingValue) {
+                                                    // Determine which operand is the induction variable and which is the limit
+                                                    Value *CmpOperand = (Cmp->getOperand(0) == IncomingValue) ? Cmp->getOperand(1) : Cmp->getOperand(0);
+
+                                                    // Ensure that the other operand (CmpOperand) is not another PHINode
+                                                    if (!isa<PHINode>(CmpOperand)) {
+                                                        MaxRange = CmpOperand;
+                                                        break; // Found the max range, no need to continue
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Store the max range for this PHINode
+                                    if (MaxRange) {
+                                        MaxRanges[Phi] = MaxRange;
+                                    }
+                                }
+
+                                return MaxRanges;
+                            };
+
+                            std::vector<PHINode *> CallIndVarPhis = TraverseUpwardsToFindPhi(CallIndVar);
+
+                            // Call FindMaxRanges on the list of PHINodes
+                            std::map<PHINode *, Value *> MaxRanges = FindMaxRangesForInductionVariables(CallIndVarPhis);
+
+                            // Perform the check depending on whether LoopBound was generated by SCEV
+                            bool DetectedIndVarMatch = false;
+                            for (PHINode *Phi : CallIndVarPhis) {
+                                if (Phi == DetectedIndVar) {
+                                    DetectedIndVarMatch = true;
+                                    break;
+                                }
+                            }
+                            IRBuilder<> Builder(OptimalPreheader->getTerminator());
+
+                            if (DetectedIndVarMatch) {
+                                // Get the first argument of the original call
+                                Value *Address = VerifyAddrCall->getOperand(0);
+                                llvm::Value *MaxRangeIndexSubexpression = nullptr;
+                                //we need to load the max ranges here
+                                if (CallIndVarPhis.size() > 1) {
+                                    // Now, ensure all upward dependencies of the max ranges are duplicated outside the loop
+                                    for (auto &PhiMaxRangePair : MaxRanges) {
+                                        llvm::PHINode *PhiNode = PhiMaxRangePair.first;
+                                        llvm::Value *MaxRangeValue = PhiMaxRangePair.second;
+
+                                        // Duplicate all dependencies of the max range value outside the loop
+                                        llvm::Value *DuplicatedMaxRangeValue = DuplicateInstructionsOutsideLoop(MaxRangeValue, Builder, L, OptimalPreheader, DT);
+
+                                        // Replace the original max range value with the duplicated one in the max range map
+                                        if (DuplicatedMaxRangeValue != MaxRangeValue) {
+                                            MaxRanges[PhiNode] = DuplicatedMaxRangeValue;
+                                        }
+                                    }
+
+                                    if (MaxRanges.size() < CallIndVarPhis.size())
+                                    {
+                                        llvm::outs() << "Could not resolve loop invariant induction variable in function : "
+                                                     << CurFn->getName() <<" for the call " << VerifyAddrCall->getName();
+                                        CallInst* callInt = dyn_cast<CallInst>(VerifyAddrCall);
+                                        Value *Arg0 = callInt->getArgOperand(0);
+                                        Value *Arg1 = callInt->getArgOperand(1);
+
+
+                                        auto CurBB = VerifyAddrCall->getParent();
+                                        llvm::Value *SanityCheck = Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(),
+                                                                                                       CurBB, CurFn,
+                                                                                           Arg0, Arg1);
+                                        auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
+                                        // Move the SanityCheckInst to immediately after the newly created instructions
+                                        SanityCheckInst->moveAfter(VerifyAddrCall);
+
+                                        // Remove the original VerifyAddrCall from the for.body block
+                                        VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
+                                        eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
+                                        VerifyAddrCall = nullptr;
+                                        continue;
+                                    }
+
+                                    // Duplicate the index subexpression with max ranges
+                                    MaxRangeIndexSubexpression = DuplicateIndexSubexpressionWithMaxRanges(Builder, CallIndVar, MaxRanges, L,
+                                                                                                          OptimalPreheader, DT);
+                                    //              auto fwd_insts = FindForwardReferencedInstructions(OptimalPreheader, DT);
+                                    auto ProcessNonDominatingPhiBlocks = [&](
+                                            llvm::IRBuilder<> &Builder,
+                                            llvm::BasicBlock *Preheader,
+                                            const std::map<llvm::PHINode *, llvm::Value *> &MaxRanges) {
+
+                                        // Iterate over the instructions in the Preheader
+                                        for (auto &Inst : *Preheader) {
+                                            if (auto *Phi = llvm::dyn_cast<llvm::PHINode>(&Inst)) {
+                                                llvm::Value *ReplacementValue = nullptr;
+
+                                                // Iterate over the MaxRanges to find a matching PHI node
+                                                for (const auto &Entry : MaxRanges) {
+                                                    llvm::PHINode *MaxRangePhi = Entry.first;
+                                                    llvm::Value *MaxRangeValue = Entry.second;
+
+                                                    // Compare the operands of the current PHI with the MaxRangePhi
+                                                    bool OperandsMatch = true;
+                                                    for (unsigned i = 0; i < MaxRangePhi->getNumIncomingValues(); ++i) {
+                                                        if (MaxRangePhi->getIncomingValue(i) != Phi->getIncomingValue(i)) {
+                                                            OperandsMatch = false;
+                                                            break;
+                                                        }
+                                                    }
+
+                                                    // If operands match, we found the corresponding max range
+                                                    if (OperandsMatch) {
+                                                        ReplacementValue = MaxRangeValue;
+                                                        break;
+                                                    }
+                                                }
+
+                                                // If a matching max range is found, replace the PHI instruction
+                                                if (ReplacementValue) {
+                                                    // Replace all uses of the PHI instruction with the ReplacementValue
+                                                    Phi->replaceAllUsesWith(ReplacementValue);
+
+                                                    // Finally, remove the PHI instruction itself
+                                                    eraseInstruction(reinterpret_cast<Instruction &>(Phi),
+                                                                     SafetyInfo, CurAST.get(), MSSAU.get());
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    };
+
+                                    ProcessNonDominatingPhiBlocks(Builder, OptimalPreheader, MaxRanges);
+                                    // Output the duplicated index subexpression for debugging
+                                    llvm::outs() << "Duplicated Index Subexpression with Max Ranges: " << *MaxRangeIndexSubexpression << "\n";
+                                    LoopBound = MaxRangeIndexSubexpression; //loop bound is now the consolidate subexpression
+                                }
+
+                                // Safely cast Address to llvm::Instruction
+                                llvm::Instruction *AddrInst = dyn_cast<llvm::Instruction>(Address);
+                                if (!AddrInst) {
+                                    llvm::errs() << "Error: dyn_cast failed for Address.\n";
+                                    continue;
+                                }
+                                llvm::Value *Duplicated_loopBound = LoopBound;
+
+                                if (L->contains(dyn_cast<Instruction>(LoopBound)))
+                                {
+                                    Duplicated_loopBound = DuplicateInstructionsOutsideLoop(LoopBound, Builder, L, OptimalPreheader, DT);
+                                }
+
+                                // Proceed with AddrInst...
+                                // Duplicating the instruction or performing other actions
+                                llvm::Value *DuplicatedAddress = DuplicateInstructionsOutsideLoop(AddrInst, Builder, L, OptimalPreheader, DT);
+
+                                if (!DuplicatedAddress) {
+                                    llvm::errs() << "Error: Failed to duplicate Address.\n";
+                                    continue;
+                                }
+
+                                // If LoopBound is a pointer, load the value it points to and handle it accordingly
+                                Instruction *LoadedVal = nullptr;
+                                Instruction *ZExtVal = nullptr;
+
+                                if (Duplicated_loopBound->getType()->isPointerTy()) {
+                                    Type *PointedType = Duplicated_loopBound->getType()->getPointerElementType();
+
+                                    if (PointedType->isIntegerTy(32)) {
+                                        // Load as i32 and zero extend to i64
+                                        LoadedVal = Builder.CreateLoad(PointedType, Duplicated_loopBound, "loaded.loopbound");
+                                        Duplicated_loopBound = Builder.CreateZExt(LoadedVal, Builder.getInt64Ty(), "zext.loopbound");
+                                        ZExtVal = cast<Instruction>(Duplicated_loopBound);
+                                    } else if (PointedType->isIntegerTy(64)) {
+                                        // Load as i64 directly
+                                        LoadedVal = Builder.CreateLoad(PointedType, Duplicated_loopBound, "loaded.loopbound");
+                                        Duplicated_loopBound = LoadedVal;
+                                    } else {
+                                        Duplicated_loopBound = nullptr;
+                                    }
+                                }
+
+                                if (Duplicated_loopBound) {
+                                    // Create the new call using the VerifyIndexableAddressFunc method
+                                    llvm::Value *SanityCheck = Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(), CurFn,
+                                                                                       DuplicatedAddress, Duplicated_loopBound);
+                                    auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
+                                    // Move the SanityCheckInst to immediately after the newly created instructions
+                                    if (ZExtVal && ZExtVal != LoadedVal) {
+                                        SanityCheckInst->moveAfter(ZExtVal);
+                                    } else if (LoadedVal) {
+                                        SanityCheckInst->moveAfter(LoadedVal);
+                                    }
+
+                                    // Remove the original VerifyAddrCall from the for.body block
+                                    VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
+                                    eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
+
+                                    VerifyAddrCall = nullptr;
+                                }
+                            }
+                        }
+                    }
                 }
-              }
             }
-          }
         }
-        // If we successfully obtained the loop bound, proceed with the transformation
-        if (LoopBound) {
-          Value *CallIndVar = nullptr;
-          // Check if VerifyAddrCall is valid and has at least one operand
-          if (VerifyAddrCall && VerifyAddrCall->getNumOperands() > 0) {
-            // Safely access the first operand
-            CallIndVar = VerifyAddrCall->getOperand(0);
-
-            // If there is more than one operand, access the second one
-            if (VerifyAddrCall->getNumOperands() > 1) {
-              CallIndVar = VerifyAddrCall->getOperand(1);
-            }
-
-            // Proceed with the rest of the code, using CallIndVar...
-          } else {
-            llvm::errs() << "Error: VerifyAddrCall is null or has no operands.\n";
-            goto skip_instrumentation;
-          }
-
-          // Traverse upwards from CallIndVar to see if it matches DetectedIndVar
-          auto TraverseUpwardsToFindPhi = [&](Value *V) -> PHINode * {
-              while (Instruction *Inst = dyn_cast<Instruction>(V)) {
-                if (PHINode *Phi = dyn_cast<PHINode>(Inst)) {
-                  return Phi;  // Found the PHI node
-                }
-                if (Inst->getNumOperands() > 0) {
-                  V = Inst->getOperand(0);  // Move to the next operand
-                } else {
-                  break;  // No more operands to follow
-                }
-              }
-              return nullptr;
-          };
-
-          PHINode *CallIndVarPhi = TraverseUpwardsToFindPhi(CallIndVar);
-
-          // Perform the check depending on whether LoopBound was generated by SCEV
-          if (CallIndVarPhi && CallIndVarPhi == DetectedIndVar) {
-            // Get the first argument of the original call
-            Value *Address = VerifyAddrCall->getOperand(0);
-
-            // Set up the block and insertion point
-            BasicBlock *LoopBoundBlock = nullptr;
-            Instruction *InsertPoint = nullptr;
-
-            if (Instruction *LoopBoundInst = dyn_cast<Instruction>(LoopBound)) {
-              LoopBoundBlock = LoopBoundInst->getParent();
-              InsertPoint = LoopBoundInst->getNextNode();  // Set the insertion point to immediately after LoopBoundInst
-            } else {
-              llvm::errs() << "Error: LoopBound is not an instruction.\n";
-            }
-
-            IRBuilder<> Builder(InsertPoint);
-            if (!isa<llvm::Instruction>(Address)) {
-              llvm::errs() << "Error: Address is not an instruction.\n";
-              goto skip_instrumentation;
-            }
-
-            // Safely cast Address to llvm::Instruction
-            llvm::Instruction *AddrInst = dyn_cast<llvm::Instruction>(Address);
-            if (!AddrInst) {
-              llvm::errs() << "Error: dyn_cast failed for Address.\n";
-              goto skip_instrumentation;
-            }
-
-            // Proceed with AddrInst...
-            // Duplicating the instruction or performing other actions
-            llvm::Value *DuplicatedAddress = DuplicateInstructionsOutsideLoop(AddrInst, Builder, L);
-            if (!DuplicatedAddress) {
-              llvm::errs() << "Error: Failed to duplicate Address.\n";
-              goto skip_instrumentation;
-            }
-
-            // If LoopBound is a pointer, load the value it points to and handle it accordingly
-            Instruction *LoadedVal = nullptr;
-            Instruction *ZExtVal = nullptr;
-
-            if (LoopBound->getType()->isPointerTy()) {
-              Type *PointedType = LoopBound->getType()->getPointerElementType();
-
-              if (PointedType->isIntegerTy(32)) {
-                // Load as i32 and zero extend to i64
-                LoadedVal = Builder.CreateLoad(PointedType, LoopBound, "loaded.loopbound");
-                LoopBound = Builder.CreateZExt(LoadedVal, Builder.getInt64Ty(), "zext.loopbound");
-                ZExtVal = cast<Instruction>(LoopBound);
-              } else if (PointedType->isIntegerTy(64)) {
-                // Load as i64 directly
-                LoadedVal = Builder.CreateLoad(PointedType, LoopBound, "loaded.loopbound");
-                LoopBound = LoadedVal;
-              } else {
-                LoopBound = nullptr;
-              }
-            }
-
-            if (LoopBound) {
-              // Create the new call using the VerifyIndexableAddressFunc method
-              llvm::Value *SanityCheck = Builder.Verify_Wasm_ptr(LoopBoundBlock->getModule(), CurFn,
-                                                                            DuplicatedAddress, LoopBound);
-              auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
-
-              // Move the SanityCheckInst to immediately after the newly created instructions
-              if (ZExtVal && ZExtVal != LoadedVal) {
-                SanityCheckInst->moveAfter(ZExtVal);
-              } else if (LoadedVal) {
-                SanityCheckInst->moveAfter(LoadedVal);
-              } else {
-                SanityCheckInst->moveBefore(InsertPoint); // If no load or zext was done, move just after LoopBound
-              }
-
-              // Remove the original VerifyAddrCall from the for.body block
-              eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
-              VerifyAddrCall = nullptr;
-            }
-          }
-        }
-      }
     }
-  }
-  skip_instrumentation:
+
 #if 0
   // Get the preheader block to move instructions into...
   Function *F = L->getHeader()->getParent();
@@ -1348,6 +1774,12 @@ bool LoopInvariantCodeMotion::runOnLoop(
   // Check that neither this loop nor its parent have had LCSSA broken. LICM is
   // specifically moving instructions across the loop boundary and so it is
   // especially in need of sanity checking here.
+  if (!L->isLCSSAForm(*DT))
+  {
+    //try again using gdb
+    bool isture = L->isLCSSAForm(*DT);
+  }
+
   assert(L->isLCSSAForm(*DT) && "Loop not left in LCSSA form after LICM!");
   assert((L->isOutermost() || L->getParentLoop()->isLCSSAForm(*DT)) &&
          "Parent loop not left in LCSSA form after LICM!");
@@ -2260,33 +2692,45 @@ static bool isFreeInLoop(const Instruction &I, const Loop *CurLoop,
 static bool isNotUsedOrFreeInLoop(const Instruction &I, const Loop *CurLoop,
                                   const LoopSafetyInfo *SafetyInfo,
                                   TargetTransformInfo *TTI, bool &FreeInLoop) {
-  const auto &BlockColors = SafetyInfo->getBlockColors();
-  bool IsFree = isFreeInLoop(I, CurLoop, TTI);
-  for (const User *U : I.users()) {
-    const Instruction *UI = cast<Instruction>(U);
-    if (const PHINode *PN = dyn_cast<PHINode>(UI)) {
-      const BasicBlock *BB = PN->getParent();
-      // We cannot sink uses in catchswitches.
-      if (isa<CatchSwitchInst>(BB->getTerminator()))
-        return false;
-
-      // We need to sink a callsite to a unique funclet.  Avoid sinking if the
-      // phi use is too muddled.
-      if (isa<CallInst>(I))
-        if (!BlockColors.empty() &&
-            BlockColors.find(const_cast<BasicBlock *>(BB))->second.size() != 1)
-          return false;
+    // Check for "DoNotRemoveFromLoop" metadata
+    if (MDNode *Node = I.getMetadata("typeflexer_md")) {
+        // Optionally, check for specific metadata content if necessary
+        if (Node->getNumOperands() > 0) {
+            if (MDString *MDS = dyn_cast<MDString>(Node->getOperand(0))) {
+                if (MDS->getString().equals("DoNotRemoveFromLoop")) {
+                    return false; // If the metadata matches, return false
+                }
+            }
+        }
     }
 
-    if (CurLoop->contains(UI)) {
-      if (IsFree) {
-        FreeInLoop = true;
-        continue;
-      }
-      return false;
+    const auto &BlockColors = SafetyInfo->getBlockColors();
+    bool IsFree = isFreeInLoop(I, CurLoop, TTI);
+    for (const User *U : I.users()) {
+        const Instruction *UI = cast<Instruction>(U);
+        if (const PHINode *PN = dyn_cast<PHINode>(UI)) {
+            const BasicBlock *BB = PN->getParent();
+            // We cannot sink uses in catchswitches.
+            if (isa<CatchSwitchInst>(BB->getTerminator()))
+                return false;
+
+            // We need to sink a callsite to a unique funclet.  Avoid sinking if the
+            // phi use is too muddled.
+            if (isa<CallInst>(I))
+                if (!BlockColors.empty() &&
+                    BlockColors.find(const_cast<BasicBlock *>(BB))->second.size() != 1)
+                    return false;
+        }
+
+        if (CurLoop->contains(UI)) {
+            if (IsFree) {
+                FreeInLoop = true;
+                continue;
+            }
+            return false;
+        }
     }
-  }
-  return true;
+    return true;
 }
 
 static Instruction *cloneInstructionInExitBlock(

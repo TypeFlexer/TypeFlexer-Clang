@@ -429,8 +429,7 @@ static CallInst *VerifyIndexableAddress(IRBuilderBase *Builder, Module *M_, Valu
   // Create and return the call instruction, which returns an i1
   return Builder->CreateCall(Decl, Ops);
 }
-
-static Value *EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *CurFn, Value *Address, Value *MaxIndex) {
+static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
     if (M_ == nullptr)
         M_ = Builder->GetInsertBlock()->getParent()->getParent();
 
@@ -438,13 +437,251 @@ static Value *EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm
     GlobalVariable *sbxHeapRange = M_->getNamedGlobal("sbxHeapRange");
     GlobalVariable *sbxHeapBase = M_->getNamedGlobal("sbxHeap");
 
-    // Check if the globals were found
-    if (!sbxHeapRange) {
-        llvm::errs() << "Error: Global variable 'sbxHeapRange' not found!\n";
+    if (!sbxHeapRange || !sbxHeapBase) {
+        llvm::errs() << "Error: Global variable 'sbxHeapRange' or 'sbxHeapBase' not found!\n";
         return nullptr;
     }
-    if (!sbxHeapBase) {
-        llvm::errs() << "Error: Global variable 'sbxHeapBase' not found!\n";
+
+    // Check if the global values are already loaded in the current basic block
+    Value *SbxHeapRangeLoadedVal = nullptr;
+    Value *SbxHeapBaseLoadedVal = nullptr;
+
+    BasicBlock *CurrentBB = Builder->GetInsertBlock();
+    for (Instruction &I : *CurrentBB) {
+        if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
+            if (LI->getPointerOperand() == sbxHeapRange) {
+                SbxHeapRangeLoadedVal = LI;
+            } else if (LI->getPointerOperand() == sbxHeapBase) {
+                SbxHeapBaseLoadedVal = LI;
+            }
+        }
+    }
+    if (!SbxHeapBaseLoadedVal) {
+        SbxHeapBaseLoadedVal = Builder->CreateAlignedLoad(
+                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
+    }
+
+    if (!SbxHeapRangeLoadedVal) {
+        SbxHeapRangeLoadedVal = Builder->CreateAlignedLoad(
+                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapRange, llvm::Align(8), false);
+    }
+
+
+    Value *OffsetValWithHeap = Builder->CreateAdd(SbxHeapBaseLoadedVal, Address);
+    Value *OffsetValWithHeapPlusMaxIndex = nullptr;
+    if (OffsetValWithHeap->getType()->getIntegerBitWidth() < 64) {
+        OffsetValWithHeapPlusMaxIndex = Builder->CreateZExt(OffsetValWithHeap, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
+    } else {
+        OffsetValWithHeapPlusMaxIndex = OffsetValWithHeap;
+    }
+
+    auto *ConstMaxIndex = dyn_cast<ConstantInt>(MaxIndex);
+    // Check if MaxIndex is a constant with value -1
+    if (!(ConstMaxIndex && ConstMaxIndex->isMinusOne())) {
+        if (MaxIndex->getType()->getIntegerBitWidth() < 64)
+            MaxIndex = Builder->CreateZExt(MaxIndex, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
+
+        OffsetValWithHeapPlusMaxIndex = Builder->CreateAdd(OffsetValWithHeapPlusMaxIndex, MaxIndex, "SbxHeapRangePlusMaxIndex");
+    }
+
+    Value *ConditionVal = Builder->CreateICmpULT(OffsetValWithHeapPlusMaxIndex, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
+    return ConditionVal;
+}
+
+static Value *EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builder, Module *M_, llvm::BasicBlock* CurBB,
+                                                    llvm::Function *CurFn, Value *Address, Value *MaxIndex) {
+    if (M_ == nullptr)
+        M_ = Builder->GetInsertBlock()->getParent()->getParent();
+
+
+
+    // Vector to store newly added instructions
+    std::vector<Instruction *> NewInstructions;
+
+    // Fetch global variables
+    GlobalVariable *sbxHeapRange = M_->getNamedGlobal("sbxHeapRange");
+    GlobalVariable *sbxHeapBase = M_->getNamedGlobal("sbxHeap");
+
+    if (!sbxHeapRange || !sbxHeapBase) {
+        llvm::errs() << "Error: Global variable 'sbxHeapRange' or 'sbxHeapBase' not found!\n";
+        return nullptr;
+    }
+
+    // Check if the global values are already loaded in the current basic block
+    Value *SbxHeapRangeLoadedVal = nullptr;
+    Value *SbxHeapBaseLoadedVal = nullptr;
+
+    BasicBlock *CurrentBB = CurBB;
+    for (Instruction &I : *CurrentBB) {
+        if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
+            if (LI->getPointerOperand() == sbxHeapRange) {
+                SbxHeapRangeLoadedVal = LI;
+            } else if (LI->getPointerOperand() == sbxHeapBase) {
+                SbxHeapBaseLoadedVal = LI;
+            }
+        }
+    }
+    Instruction* TargetInstr = static_cast<Instruction *>(Address);
+    Builder->SetInsertPoint(TargetInstr->getNextNode());
+
+    if (!SbxHeapBaseLoadedVal) {
+        SbxHeapBaseLoadedVal = Builder->CreateAlignedLoad(
+                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
+        NewInstructions.push_back(cast<Instruction>(SbxHeapBaseLoadedVal));
+    }
+
+    if (!SbxHeapRangeLoadedVal) {
+        SbxHeapRangeLoadedVal = Builder->CreateAlignedLoad(
+                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapRange, llvm::Align(8), false);
+        NewInstructions.push_back(cast<Instruction>(SbxHeapRangeLoadedVal));
+    }
+
+    Value *OffsetValWithHeap = Builder->CreateAdd(SbxHeapBaseLoadedVal, Address);
+    NewInstructions.push_back(cast<Instruction>(OffsetValWithHeap));
+
+    Value *OffsetValWithHeapPlusMaxIndex = nullptr;
+    if (OffsetValWithHeap->getType()->getIntegerBitWidth() < 64) {
+        OffsetValWithHeapPlusMaxIndex = Builder->CreateZExt(OffsetValWithHeap, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
+        NewInstructions.push_back(cast<Instruction>(OffsetValWithHeapPlusMaxIndex));
+    } else {
+        OffsetValWithHeapPlusMaxIndex = OffsetValWithHeap;
+    }
+
+    auto *ConstMaxIndex = dyn_cast<ConstantInt>(MaxIndex);
+    // Check if MaxIndex is a constant with value -1
+    if (!(ConstMaxIndex && ConstMaxIndex->isMinusOne())) {
+        if (MaxIndex->getType()->getIntegerBitWidth() < 64) {
+            MaxIndex = Builder->CreateZExt(MaxIndex, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
+            NewInstructions.push_back(cast<Instruction>(MaxIndex));
+        }
+
+        OffsetValWithHeapPlusMaxIndex = Builder->CreateAdd(OffsetValWithHeapPlusMaxIndex, MaxIndex, "SbxHeapRangePlusMaxIndex");
+        NewInstructions.push_back(cast<Instruction>(OffsetValWithHeapPlusMaxIndex));
+    }
+
+    Value *ConditionVal = Builder->CreateICmpULT(OffsetValWithHeapPlusMaxIndex, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
+    NewInstructions.push_back(cast<Instruction>(ConditionVal));
+
+    Instruction *Term = CurrentBB->getTerminator();
+    Value *ExistingTaintCheck = nullptr;
+    Value* ExistingTaintCheck2 = nullptr;
+    BasicBlock *SanityCheckBB = nullptr;
+
+    if (auto *Br = dyn_cast<BranchInst>(Term)) {
+        if (!Br->isConditional()) {
+            SanityCheckBB = Br->getSuccessor(0);
+            if (SanityCheckBB->getName().startswith("sanityCheck")) {
+                if (auto *SanityCheckBr = dyn_cast<BranchInst>(SanityCheckBB->getTerminator())) {
+                    ExistingTaintCheck = SanityCheckBr->getCondition();
+                }
+            }
+        }
+        else
+        {
+            ExistingTaintCheck2 = Br->getCondition();
+        }
+    }
+
+    if (ExistingTaintCheck) {
+        IRBuilder<> SanityCheckBuilder(SanityCheckBB);
+        SanityCheckBuilder.SetInsertPoint(SanityCheckBB->getTerminator());
+
+        Value *CombinedCondition = SanityCheckBuilder.CreateAnd(ExistingTaintCheck, ConditionVal, "CombinedTaintCheck");
+        NewInstructions.push_back(cast<Instruction>(CombinedCondition));
+
+        if (auto *SanityCheckBr = dyn_cast<BranchInst>(SanityCheckBB->getTerminator())) {
+            SanityCheckBr->setCondition(CombinedCondition);
+        }
+    }
+    else if (ExistingTaintCheck2) {
+        IRBuilder<> CurBBB(CurrentBB);
+        Instruction* ExistingTaintCheck2Instr = static_cast<Instruction *>(ExistingTaintCheck2);
+        CurBBB.SetInsertPoint(ExistingTaintCheck2Instr->getNextNode());
+
+        Value *CombinedCondition = CurBBB.CreateAnd(ExistingTaintCheck2, ConditionVal, "CombinedTaintCheck");
+
+        if (auto *SanityCheckBr = dyn_cast<BranchInst>(SanityCheckBB->getTerminator())) {
+            SanityCheckBr->setCondition(CombinedCondition);
+        }
+    }
+    else {
+        SanityCheckBB = BasicBlock::Create(M_->getContext(), "sanityCheck", CurFn);
+
+        BasicBlock *TrapBB = BasicBlock::Create(M_->getContext(), "trap", CurFn);
+        BasicBlock *OriginalTarget = nullptr;
+
+        IRBuilder<> TrapBuilder(TrapBB);
+        Function *TrapFn = Intrinsic::getDeclaration(M_, Intrinsic::trap);
+        TrapBuilder.CreateCall(TrapFn);
+        TrapBuilder.CreateUnreachable();
+
+        if (auto *Ret = dyn_cast<ReturnInst>(Term)) {
+            IRBuilder<> Builder(Term);
+            BasicBlock *RetBB = BasicBlock::Create(M_->getContext(), "ret_block", CurFn);
+
+            IRBuilder<> RetBuilder(RetBB);
+            RetBuilder.CreateRet(Ret->getReturnValue());
+
+            IRBuilder<> SanityCheckBuilder(SanityCheckBB);
+            SanityCheckBuilder.CreateCondBr(ConditionVal, RetBB, TrapBB);
+
+            Builder.CreateBr(SanityCheckBB);
+            Ret->eraseFromParent();
+
+            OriginalTarget = RetBB;
+        } else if (auto *Br = dyn_cast<BranchInst>(Term)) {
+            IRBuilder<> Builder(Term);
+
+            if (Br->isConditional()) {
+                OriginalTarget = Br->getSuccessor(0);
+                Builder.CreateCondBr(Br->getCondition(), SanityCheckBB, Br->getSuccessor(1));
+            } else {
+                OriginalTarget = Br->getSuccessor(0);
+                Builder.CreateBr(SanityCheckBB);
+            }
+            Term->eraseFromParent();
+            IRBuilder<> SanityCheckBuilder(SanityCheckBB);
+            SanityCheckBuilder.CreateCondBr(ConditionVal, OriginalTarget, TrapBB);
+        }
+
+        if (OriginalTarget) {
+            for (PHINode &PN : OriginalTarget->phis()) {
+                int BBIndex = PN.getBasicBlockIndex(CurrentBB);
+                if (BBIndex != -1) {
+                    Value *IncomingValue = PN.getIncomingValue(BBIndex);
+                    PN.addIncoming(IncomingValue, SanityCheckBB);
+                    PN.removeIncomingValue(BBIndex, false);
+                }
+            }
+        }
+
+        for (PHINode &PN : TrapBB->phis()) {
+            int BBIndex = PN.getBasicBlockIndex(CurrentBB);
+            if (BBIndex != -1) {
+                Value *IncomingValue = PN.getIncomingValue(BBIndex);
+                PN.addIncoming(IncomingValue, SanityCheckBB);
+                PN.removeIncomingValue(BBIndex, false);
+            }
+        }
+    }
+
+    return OffsetValWithHeap;
+}
+
+static Value *EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *CurFn, Value *Address, Value *MaxIndex) {
+    if (M_ == nullptr)
+        M_ = Builder->GetInsertBlock()->getParent()->getParent();
+
+
+    // Vector to store newly added instructions
+    std::vector<Instruction *> NewInstructions;
+
+    // Fetch global variables
+    GlobalVariable *sbxHeapRange = M_->getNamedGlobal("sbxHeapRange");
+    GlobalVariable *sbxHeapBase = M_->getNamedGlobal("sbxHeap");
+
+    if (!sbxHeapRange || !sbxHeapBase) {
+        llvm::errs() << "Error: Global variable 'sbxHeapRange' or 'sbxHeapBase' not found!\n";
         return nullptr;
     }
 
@@ -463,56 +700,131 @@ static Value *EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm
         }
     }
 
-    // Load the global values if they are not already loaded
-    if (!SbxHeapRangeLoadedVal) {
-        SbxHeapRangeLoadedVal = Builder->CreateAlignedLoad(
-                llvm::Type::getInt32Ty(M_->getContext()), sbxHeapRange, llvm::Align(8), false);
-    }
     if (!SbxHeapBaseLoadedVal) {
         SbxHeapBaseLoadedVal = Builder->CreateAlignedLoad(
                 llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
+        NewInstructions.push_back(cast<Instruction>(SbxHeapBaseLoadedVal));
     }
 
-    // Perform the address calculations
+    if (!SbxHeapRangeLoadedVal) {
+        SbxHeapRangeLoadedVal = Builder->CreateAlignedLoad(
+                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapRange, llvm::Align(8), false);
+        NewInstructions.push_back(cast<Instruction>(SbxHeapRangeLoadedVal));
+    }
+
     Value *OffsetValWithHeap = Builder->CreateAdd(SbxHeapBaseLoadedVal, Address);
+    NewInstructions.push_back(cast<Instruction>(OffsetValWithHeap));
 
-    // Extend sbxHeapRange to i64 and add MaxIndex
-    Value *SbxHeapRangeLoadedVal64 = Builder->CreateZExt(SbxHeapRangeLoadedVal, llvm::Type::getInt64Ty(M_->getContext()));
-    Value *SbxHeapRangePlusMaxIndex = Builder->CreateAdd(SbxHeapRangeLoadedVal64, MaxIndex, "SbxHeapRangePlusMaxIndex");
+    Value *OffsetValWithHeapPlusMaxIndex = nullptr;
+    if (OffsetValWithHeap->getType()->getIntegerBitWidth() < 64) {
+        OffsetValWithHeapPlusMaxIndex = Builder->CreateZExt(OffsetValWithHeap, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
+        NewInstructions.push_back(cast<Instruction>(OffsetValWithHeapPlusMaxIndex));
+    } else {
+        OffsetValWithHeapPlusMaxIndex = OffsetValWithHeap;
+    }
 
-    // Perform the condition check
-    Value *ConditionVal = Builder->CreateICmpULT(OffsetValWithHeap, SbxHeapRangePlusMaxIndex, "SandMem.TaintCheck");
+    auto *ConstMaxIndex = dyn_cast<ConstantInt>(MaxIndex);
+    // Check if MaxIndex is a constant with value -1
+    if (!(ConstMaxIndex && ConstMaxIndex->isMinusOne())) {
+        if (MaxIndex->getType()->getIntegerBitWidth() < 64) {
+            MaxIndex = Builder->CreateZExt(MaxIndex, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
+            NewInstructions.push_back(cast<Instruction>(MaxIndex));
+        }
 
-    // Get the current basic block and create the necessary new blocks
-    BasicBlock *CheckSanityBB = BasicBlock::Create(M_->getContext(), "checkSanityForLoop", CurFn);
-    BasicBlock *TrapBB = BasicBlock::Create(M_->getContext(), "trap", CurFn);
-    BasicBlock *PreheaderBB = BasicBlock::Create(M_->getContext(), "for.body.lr.ph", CurFn);
+        OffsetValWithHeapPlusMaxIndex = Builder->CreateAdd(OffsetValWithHeapPlusMaxIndex, MaxIndex, "SbxHeapRangePlusMaxIndex");
+        NewInstructions.push_back(cast<Instruction>(OffsetValWithHeapPlusMaxIndex));
+    }
 
-    // Set up the trap block
-    IRBuilder<> TrapBuilder(TrapBB);
-    Function *TrapFn = Intrinsic::getDeclaration(M_, Intrinsic::trap);
-    TrapBuilder.CreateCall(TrapFn);
-    TrapBuilder.CreateUnreachable();
+    Value *ConditionVal = Builder->CreateICmpULT(OffsetValWithHeapPlusMaxIndex, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
+    NewInstructions.push_back(cast<Instruction>(ConditionVal));
 
-    // Original branch from the condition check
-    BasicBlock *OriginalTarget = nullptr;
     Instruction *Term = CurrentBB->getTerminator();
+    Value *ExistingTaintCheck = nullptr;
+    BasicBlock *SanityCheckBB = nullptr;
+
     if (auto *Br = dyn_cast<BranchInst>(Term)) {
-        if (Br->isConditional()) {
-            OriginalTarget = Br->getSuccessor(0);
-            Br->setSuccessor(0, CheckSanityBB); // Redirect the true branch to the new block
+        if (!Br->isConditional()) {
+            SanityCheckBB = Br->getSuccessor(0);
+            if (SanityCheckBB->getName().startswith("sanityCheck")) {
+                if (auto *SanityCheckBr = dyn_cast<BranchInst>(SanityCheckBB->getTerminator())) {
+                    ExistingTaintCheck = SanityCheckBr->getCondition();
+                }
+            }
         }
     }
 
-    // In the checkSanityForLoop block, check the condition and branch accordingly
-    Builder->SetInsertPoint(CheckSanityBB);
-    Builder->CreateCondBr(ConditionVal, PreheaderBB, TrapBB);
+    if (ExistingTaintCheck) {
+        IRBuilder<> SanityCheckBuilder(SanityCheckBB);
 
-    // In the preheader, continue to the original loop body
-    Builder->SetInsertPoint(PreheaderBB);
-    Builder->CreateBr(OriginalTarget);
+        SanityCheckBuilder.SetInsertPoint(SanityCheckBB->getTerminator());
 
-    // Return the first inserted instruction, which is OffsetValWithHeap
+        Value *CombinedCondition = SanityCheckBuilder.CreateAnd(ExistingTaintCheck, ConditionVal, "CombinedTaintCheck");
+        NewInstructions.push_back(cast<Instruction>(CombinedCondition));
+
+        if (auto *SanityCheckBr = dyn_cast<BranchInst>(SanityCheckBB->getTerminator())) {
+            SanityCheckBr->setCondition(CombinedCondition);
+        }
+    } else {
+        SanityCheckBB = BasicBlock::Create(M_->getContext(), "sanityCheck", CurFn);
+
+        BasicBlock *TrapBB = BasicBlock::Create(M_->getContext(), "trap", CurFn);
+        BasicBlock *OriginalTarget = nullptr;
+
+        IRBuilder<> TrapBuilder(TrapBB);
+        Function *TrapFn = Intrinsic::getDeclaration(M_, Intrinsic::trap);
+        TrapBuilder.CreateCall(TrapFn);
+        TrapBuilder.CreateUnreachable();
+
+        if (auto *Ret = dyn_cast<ReturnInst>(Term)) {
+            IRBuilder<> Builder(Term);
+            BasicBlock *RetBB = BasicBlock::Create(M_->getContext(), "ret_block", CurFn);
+
+            IRBuilder<> RetBuilder(RetBB);
+            RetBuilder.CreateRet(Ret->getReturnValue());
+
+            IRBuilder<> SanityCheckBuilder(SanityCheckBB);
+            SanityCheckBuilder.CreateCondBr(ConditionVal, RetBB, TrapBB);
+
+            Builder.CreateBr(SanityCheckBB);
+            Ret->eraseFromParent();
+
+            OriginalTarget = RetBB;
+        } else if (auto *Br = dyn_cast<BranchInst>(Term)) {
+            IRBuilder<> Builder(Term);
+
+            if (Br->isConditional()) {
+                OriginalTarget = Br->getSuccessor(0);
+                Builder.CreateCondBr(Br->getCondition(), SanityCheckBB, Br->getSuccessor(1));
+            } else {
+                OriginalTarget = Br->getSuccessor(0);
+                Builder.CreateBr(SanityCheckBB);
+            }
+            Term->eraseFromParent();
+            IRBuilder<> SanityCheckBuilder(SanityCheckBB);
+            SanityCheckBuilder.CreateCondBr(ConditionVal, OriginalTarget, TrapBB);
+        }
+
+        if (OriginalTarget) {
+            for (PHINode &PN : OriginalTarget->phis()) {
+                int BBIndex = PN.getBasicBlockIndex(CurrentBB);
+                if (BBIndex != -1) {
+                    Value *IncomingValue = PN.getIncomingValue(BBIndex);
+                    PN.addIncoming(IncomingValue, SanityCheckBB);
+                    PN.removeIncomingValue(BBIndex, false);
+                }
+            }
+        }
+
+        for (PHINode &PN : TrapBB->phis()) {
+            int BBIndex = PN.getBasicBlockIndex(CurrentBB);
+            if (BBIndex != -1) {
+                Value *IncomingValue = PN.getIncomingValue(BBIndex);
+                PN.addIncoming(IncomingValue, SanityCheckBB);
+                PN.removeIncomingValue(BBIndex, false);
+            }
+        }
+    }
+
     return OffsetValWithHeap;
 }
 
@@ -639,6 +951,16 @@ CallInst *IRBuilderBase::VerifyIndexableAddressFunc(Module* M, Value *Address, V
 Value *IRBuilderBase::Verify_Wasm_ptr(Module* M, llvm::Function* CurFn, Value *Address,Value *MaxIndex){
   //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
   return EmitWASM_SBX_sanity_check(this, M,CurFn, Address, MaxIndex);
+}
+
+Value *IRBuilderBase::Verify_Wasm_ptr_within_loop(Module* M, llvm::BasicBlock* CurBB, llvm::Function* CurFn, Value *Address,Value *MaxIndex) {
+    //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
+    return EmitWASM_SBX_sanity_check_within_loop(this, M, CurBB, CurFn, Address, MaxIndex);
+}
+
+Value *IRBuilderBase::AddWasm_condition(Module* M, Value *Address,Value *MaxIndex){
+    //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
+    return addWasm_condition(this, M, Address, MaxIndex);
 }
 
 CallInst *IRBuilderBase::CreateIntMinReduce(Value *Src, bool IsSigned) {

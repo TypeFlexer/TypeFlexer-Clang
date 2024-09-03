@@ -2754,8 +2754,6 @@ void CodeGenModule::EmitGlobal(GlobalDecl GD) {
   const auto *Global = cast<ValueDecl>(GD.getDecl());
   //Create a global variable
   //check if sbx is enabled
-  auto const_int_val_32 =
-      llvm::ConstantInt::get(getModule().getContext(), llvm::APInt(32, 0));
   auto const_int_val_64 =
       llvm::ConstantInt::get(getModule().getContext(), llvm::APInt(64, 0));
   if (getCodeGenOpts().wasmsbx) {
@@ -2767,10 +2765,10 @@ void CodeGenModule::EmitGlobal(GlobalDecl GD) {
     sbxHeap->setLinkage(llvm::GlobalValue::CommonLinkage);
 
     // Insert a global variable to store the HeapBound
-    getModule().getOrInsertGlobal("sbxHeapRange", Int32Ty);
+    getModule().getOrInsertGlobal("sbxHeapRange", Int64Ty);
     llvm::GlobalVariable *sbxHeapBound =
         getModule().getNamedGlobal("sbxHeapRange");
-    sbxHeapBound->setInitializer(const_int_val_32);
+    sbxHeapBound->setInitializer(const_int_val_64);
     sbxHeapBound->setLinkage(llvm::GlobalValue::CommonLinkage);
   }else if (getCodeGenOpts().heapsbx)
   {

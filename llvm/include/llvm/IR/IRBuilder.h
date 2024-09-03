@@ -2751,6 +2751,8 @@ public:
     CallInst *VerifyIndexableAddressFunc(llvm::Module *M, Value*, Value*);
 
     Value *Verify_Wasm_ptr(Module *M, llvm::Function*, Value *Address, Value *MaxIndex);
+    Value *Verify_Wasm_ptr_within_loop(Module* M, llvm::BasicBlock* CurBB, llvm::Function* CurFn, Value *Address,Value *MaxIndex);
+    Value *AddWasm_condition(Module *M, Value *Address, Value *MaxIndex);
 };
 
 /// This provides a uniform API for creating instructions and inserting

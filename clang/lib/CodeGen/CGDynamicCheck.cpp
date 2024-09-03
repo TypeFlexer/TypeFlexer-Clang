@@ -646,16 +646,51 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
 
      if (shouldCheckSanity)
      {
-         GlobalVariable *sbxHeapRange = CGM.getModule().getNamedGlobal("sbxHeapRange");
-         Value *SbxHeapRangeLoadedVal = Builder.CreateAlignedLoad(
-                 llvm::Type::getInt32Ty(BaseAddr.getPointer()->getContext()),
-                 sbxHeapRange, 8, false);
-         if (!BaseAddr.getType()->getCoreElementType()->isFunctionTy()) {
-             ValidTPtrOffset = OffsetVal32;
-             ConditionVal = Builder.CreateICmpULT(ValidTPtrOffset, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
-             EmitDynamicCheckBlocks(ConditionVal);
+//         GlobalVariable *sbxHeapRange = CGM.getModule().getNamedGlobal("sbxHeapRange");
+//         Value *SbxHeapRangeLoadedVal = Builder.CreateAlignedLoad(
+//                 llvm::Type::getInt32Ty(BaseAddr.getPointer()->getContext()),
+//                 sbxHeapRange, 8, false);
+//         if (!BaseAddr.getType()->getCoreElementType()->isFunctionTy()) {
+//             ValidTPtrOffset = OffsetVal32;
+//             ConditionVal = Builder.CreateICmpULT(ValidTPtrOffset, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
+//             EmitDynamicCheckBlocks(ConditionVal);
+
+         // Assign the loaded or cast value to MaxIdx
+         llvm::Value *MaxIdx = llvm::ConstantInt::get(llvm::Type::getInt64Ty(BaseAddr.getPointer()->getContext()),
+                                                        -1, true);
+
+         // Convert the pointer (Addr) to an i64 integer type
+         llvm::Value *Address = Builder.CreatePtrToInt(BaseAddr.getPointer(), Int64Ty);
+
+         // Get the current basic block
+         llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
+
+         // Check if there's a duplicate of the call in the current basic block
+         bool IsDuplicate = false;
+         for (llvm::Instruction &I : *CurrentBB) {
+             if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                 if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+                     if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
+                         IsDuplicate = true;
+                         break;
+                     }
+                 }
+             }
          }
 
+         // Only insert the call if it's not a duplicate
+         if (!IsDuplicate) {
+            if (auto *ConstInt = dyn_cast<ConstantInt>(MaxIdx))
+                if (ConstInt->isMinusOne())
+                    ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address, MaxIdx);
+                else
+                    Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+            else
+                Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+         }
+
+         if (ConditionVal)
+            EmitDynamicCheckBlocks(ConditionVal);
 
          if (DestTy->isTStructTy() || (DestTy->isPointerTy() && DestTy->getCoreElementType()->isTStructTy())) {
              DestTy = DecoyedDestTy = ChangeStructName(reinterpret_cast<StructType *>(DestTy));
