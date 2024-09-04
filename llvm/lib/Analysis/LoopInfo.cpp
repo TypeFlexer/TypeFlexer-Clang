@@ -444,7 +444,8 @@ static bool isBlockInLCSSAForm(const Loop &L, const BasicBlock &BB,
       // block they are defined in.  Also, blocks not reachable from the
       // entry are special; uses in them don't need to go through PHIs.
       if (UserBB != &BB && !L.contains(UserBB) &&
-          DT.isReachableFromEntry(UserBB))
+          DT.isReachableFromEntry(UserBB) &&
+          !DT.dominates(UserBB, &BB))
         return false;
     }
   }

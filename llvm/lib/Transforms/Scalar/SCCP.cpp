@@ -1732,12 +1732,23 @@ static bool runSCCP(Function &F, const DataLayout &DL,
 
   bool MadeChanges = false;
 
+  // Vector to store blocks that need to be silently removed later.
+  std::vector<BasicBlock *> BlocksToRemove;
+
   // If we decided that there are basic blocks that are dead in this function,
   // delete their contents now.  Note that we cannot actually delete the blocks,
   // as we cannot modify the CFG of the function.
 
   SmallPtrSet<Value *, 32> InsertedValues;
   for (BasicBlock &BB : F) {
+    // Check if the block has no predecessors or instructions and starts with
+    // "sanityCheck" or "trap".
+    if (pred_empty(&BB) && BB.empty() &&
+        (BB.getName().startswith("sanityCheck") || BB.getName().startswith("trap"))) {
+      BlocksToRemove.push_back(&BB);
+      continue;
+    }
+
     if (!Solver.isBlockExecutable(&BB)) {
       LLVM_DEBUG(dbgs() << "  BasicBlock Dead:" << BB);
 
@@ -1750,6 +1761,11 @@ static bool runSCCP(Function &F, const DataLayout &DL,
 
     MadeChanges |= simplifyInstsInBlock(Solver, BB, InsertedValues,
                                         NumInstRemoved, NumInstReplaced);
+  }
+
+  // Now remove all the collected blocks that were marked for removal.
+  for (BasicBlock *BB : BlocksToRemove) {
+    BB->eraseFromParent();
   }
 
   return MadeChanges;

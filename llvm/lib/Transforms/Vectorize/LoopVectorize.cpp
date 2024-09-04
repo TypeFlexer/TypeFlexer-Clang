@@ -9613,6 +9613,29 @@ bool LoopVectorizePass::processLoop(Loop *L) {
   return true;
 }
 
+void removeStrayBlocksFromLoop(Function &F, LoopInfo &LI) {
+    // Iterate over all loops in the function
+    for (Loop *L : LI) {
+        SmallVector<BasicBlock*, 8> BlocksToRemove;
+
+        // Iterate through each block in the loop
+        for (BasicBlock *BB : L->blocks()) {
+            // Check if the block has no predecessors and no instructions
+            // Also check if the block name starts with "sanityCheck" or "trap"
+            if (pred_empty(BB) && (BB->empty() ||
+                                   BB->getName().startswith("sanityCheck") || BB->getName().startswith("trap"))) {
+                BlocksToRemove.push_back(BB);
+            }
+        }
+
+        // Remove stray blocks from the loop
+        for (BasicBlock *BB : BlocksToRemove) {
+            // Remove the block from the function
+            BB->eraseFromParent();
+        }
+    }
+}
+
 LoopVectorizeResult LoopVectorizePass::runImpl(
     Function &F, ScalarEvolution &SE_, LoopInfo &LI_, TargetTransformInfo &TTI_,
     DominatorTree &DT_, BlockFrequencyInfo &BFI_, TargetLibraryInfo *TLI_,
@@ -9644,6 +9667,8 @@ LoopVectorizeResult LoopVectorizePass::runImpl(
     return LoopVectorizeResult(false, false);
 
   bool Changed = false, CFGChanged = false;
+
+  removeStrayBlocksFromLoop(F, LI_);
 
   // The vectorizer requires loops to be in simplified form.
   // Since simplification may add new inner loops, it has to run before the

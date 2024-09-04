@@ -649,8 +649,6 @@ bool LoopInvariantCodeMotion::runOnLoop(
     llvm::SmallVector<Instruction *, 8> ToErase;
     bool instrumentTaintSanity = true;
 
-    if (CurFn->getName().str() == "LBM_storeVelocityField")
-        int a = 10;
     if (instrumentTaintSanity)
     {
         for (BasicBlock *BB : L->blocks()) {
@@ -801,8 +799,21 @@ bool LoopInvariantCodeMotion::runOnLoop(
                                 }
 
                                 // Create the new call using the VerifyIndexableAddressFunc method
-                                llvm::Value *SanityCheck = Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(), CurFn,
-                                                                                   Address, LoopBound);
+                                auto [SanityCheck, NewBasicBlocks] = Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(),
+                                                                                             CurFn, Address, LoopBound);
+                                SmallVector<BasicBlock *, 8> ExitBBs; // Assuming you have this somewhere to track exit blocks
+                                L->getExitBlocks(ExitBBs);  // Retrieve current exit blocks
+
+                                for (BasicBlock *NewBB : NewBasicBlocks) {
+                                    if (NewBB->getName().startswith("trap")) {
+                                        // If the basic block starts with "trap", add it to ExitBBs (not to the loop)
+                                        ExitBBs.push_back(NewBB);
+                                    } else {
+                                        // Add non-"trap" blocks to the loop
+                                        //L->addBasicBlockToLoop(NewBB, *LI);
+                                    }
+                                }
+
                                 auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
                                 VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
                                 // Remove the original VerifyAddrCall from the for.body block
@@ -999,9 +1010,21 @@ bool LoopInvariantCodeMotion::runOnLoop(
 
 
                                         auto CurBB = VerifyAddrCall->getParent();
-                                        llvm::Value *SanityCheck = Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(),
-                                                                                                       CurBB, CurFn,
-                                                                                           Arg0, Arg1);
+                                        auto [SanityCheck, NewBasicBlocks] = Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(),
+                                                                                                                 CurBB, CurFn,
+                                                                                                                 Arg0, Arg1, VerifyAddrCall);
+                                        SmallVector<BasicBlock *, 8> ExitBBs; // Assuming you have this somewhere to track exit blocks
+                                        L->getExitBlocks(ExitBBs);  // Retrieve current exit blocks
+
+                                        for (BasicBlock *NewBB : NewBasicBlocks) {
+                                            if (NewBB->getName().startswith("trap")) {
+                                                // If the basic block starts with "trap", add it to ExitBBs (not to the loop)
+                                                ExitBBs.push_back(NewBB);
+                                            } else {
+                                                // Add non-"trap" blocks to the loop
+                                                //L->addBasicBlockToLoop(NewBB, *LI);
+                                            }
+                                        }
                                         auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
                                         // Move the SanityCheckInst to immediately after the newly created instructions
                                         SanityCheckInst->moveAfter(VerifyAddrCall);
@@ -1113,8 +1136,22 @@ bool LoopInvariantCodeMotion::runOnLoop(
 
                                 if (Duplicated_loopBound) {
                                     // Create the new call using the VerifyIndexableAddressFunc method
-                                    llvm::Value *SanityCheck = Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(), CurFn,
-                                                                                       DuplicatedAddress, Duplicated_loopBound);
+                                    auto [SanityCheck, NewBasicBlocks] = Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(),
+                                                                                                 CurFn, DuplicatedAddress,
+                                                                                                 Duplicated_loopBound);
+                                    SmallVector<BasicBlock *, 8> ExitBBs; // Assuming you have this somewhere to track exit blocks
+                                    L->getExitBlocks(ExitBBs);  // Retrieve current exit blocks
+
+                                    for (BasicBlock *NewBB : NewBasicBlocks) {
+                                        if (NewBB->getName().startswith("trap")) {
+                                            // If the basic block starts with "trap", add it to ExitBBs (not to the loop)
+                                            ExitBBs.push_back(NewBB);
+                                        } else {
+                                            // Add non-"trap" blocks to the loop
+                                            //L->addBasicBlockToLoop(NewBB, *LI);
+                                        }
+                                    }
+
                                     auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
                                     // Move the SanityCheckInst to immediately after the newly created instructions
                                     if (ZExtVal && ZExtVal != LoadedVal) {
@@ -2441,7 +2478,12 @@ bool llvm::canSinkOrHoistInst(Instruction &I, AAResults *AA, DominatorTree *DT,
   assert(((CurAST != nullptr) ^ (MSSAU != nullptr)) &&
          "Either AliasSetTracker or MemorySSA should be initialized.");
 
-  // If we don't understand the instruction, bail early.
+  if (I.getMetadata("SanityCheck")) {
+    // If it does, we should not sink or hoist this instruction.
+    return false;
+  }
+
+    // If we don't understand the instruction, bail early.
   if (!isHoistableAndSinkableInst(I))
     return false;
 

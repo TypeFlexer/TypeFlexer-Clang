@@ -4243,6 +4243,8 @@ void Verifier::verifyDominatesUse(Instruction &I, unsigned i) {
     return;
 
   const Use &U = I.getOperandUse(i);
+  if (!DT.dominates(Op,U))
+    int a =10;
   Assert(DT.dominates(Op, U),
          "Instruction does not dominate all uses!", Op, &I);
 }

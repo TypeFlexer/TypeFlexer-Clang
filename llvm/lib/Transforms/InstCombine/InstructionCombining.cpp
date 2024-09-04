@@ -3947,6 +3947,25 @@ static bool prepareICWorklistFromFunction(Function &F, const DataLayout &DL,
   return MadeIRChange;
 }
 
+void removeStrayBlocksFromFunction(Function &F) {
+  // Vector to collect stray blocks to be removed
+  SmallVector<BasicBlock*, 8> BlocksToRemove;
+
+  // Iterate through all the basic blocks in the function
+  for (BasicBlock &BB : F) {
+    // Check if the block has no predecessors and is either empty or has a special name
+    if (pred_empty(&BB) && (BB.empty() ||
+                            BB.getName().startswith("sanityCheck") || BB.getName().startswith("trap"))) {
+      BlocksToRemove.push_back(&BB);  // Mark the block for removal
+    }
+  }
+
+  // Remove all the stray blocks collected
+  for (BasicBlock *BB : BlocksToRemove) {
+    BB->eraseFromParent();
+  }
+}
+
 static bool combineInstructionsOverFunction(
     Function &F, InstCombineWorklist &Worklist, AliasAnalysis *AA,
     AssumptionCache &AC, TargetLibraryInfo &TLI, TargetTransformInfo &TTI,
@@ -3955,6 +3974,7 @@ static bool combineInstructionsOverFunction(
   auto &DL = F.getParent()->getDataLayout();
   MaxIterations = std::min(MaxIterations, LimitMaxIterations.getValue());
 
+  removeStrayBlocksFromFunction(F);
   /// Builder - This is an IRBuilder that automatically inserts new
   /// instructions into the worklist when they are created.
   IRBuilder<TargetFolder, IRBuilderCallbackInserter> Builder(

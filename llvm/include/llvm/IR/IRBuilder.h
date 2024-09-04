@@ -43,6 +43,8 @@
 #include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/AliasAnalysis.h"
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -2750,9 +2752,13 @@ public:
 
     CallInst *VerifyIndexableAddressFunc(llvm::Module *M, Value*, Value*);
 
-    Value *Verify_Wasm_ptr(Module *M, llvm::Function*, Value *Address, Value *MaxIndex);
-    Value *Verify_Wasm_ptr_within_loop(Module* M, llvm::BasicBlock* CurBB, llvm::Function* CurFn, Value *Address,Value *MaxIndex);
     Value *AddWasm_condition(Module *M, Value *Address, Value *MaxIndex);
+
+    std::tuple<Value *, std::vector<BasicBlock *>>
+    Verify_Wasm_ptr(Module *M, Function *CurFn, Value *Address, Value *MaxIndex);
+
+    std::tuple<Value *, std::vector<BasicBlock *>>
+    Verify_Wasm_ptr_within_loop(Module *M, BasicBlock *CurBB, Function *CurFn, Value *Address, Value *MaxIndex, Instruction*);
 };
 
 /// This provides a uniform API for creating instructions and inserting

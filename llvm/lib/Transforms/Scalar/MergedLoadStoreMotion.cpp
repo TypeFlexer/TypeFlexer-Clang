@@ -354,11 +354,32 @@ bool MergedLoadStoreMotion::run(Function &F, AliasAnalysis &AA) {
   // optimization opportunities.
   // This loop doesn't care about newly inserted/split blocks 
   // since they never will be diamond heads.
-  for (BasicBlock &BB : make_early_inc_range(F))
+  std::vector<BasicBlock *> BlocksToRemove;
+
+  for (BasicBlock &BB : make_early_inc_range(F)) {
+    // Check if the block has no predecessors
+    if (pred_empty(&BB)) {
+      StringRef BlockName = BB.getName();
+      // Check if the block name starts with "sanityCheck" or "trap"
+      if (BlockName.startswith("sanityCheck") || BlockName.startswith("trap")) {
+        // Store the block in the vector for later removal
+        BlocksToRemove.push_back(&BB);
+        continue;
+      }
+    }
+
     // Hoist equivalent loads and sink stores
     // outside diamonds when possible
-    if (isDiamondHead(&BB))
+    if (isDiamondHead(&BB)) {
       Changed |= mergeStores(&BB);
+    }
+  }
+
+// After the iteration, remove the collected blocks
+  for (BasicBlock *BB : BlocksToRemove) {
+    BB->eraseFromParent();
+  }
+
   return Changed;
 }
 
