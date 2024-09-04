@@ -34,6 +34,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <unordered_set>
+#include "llvm/IR/IRBuilder.h"
 using namespace llvm;
 
 // See PassManagers.h for Pass Manager infrastructure overview.
@@ -1501,6 +1502,56 @@ bool FPPassManager::doFinalization(Module &M) {
   return Changed;
 }
 
+void createCheckAndTrapFunction(Module &M) {
+  LLVMContext &Context = M.getContext();
+  llvm::IRBuilder<> Builder(Context);
+
+  // Check if the 'check_and_trap' function already exists in the module
+  if (Function *ExistingFn = M.getFunction("check_and_trap")) {
+    // If the function already exists, don't recreate it
+    return;
+  }
+
+  // Create the function signature for the 'check_and_trap' function
+  FunctionType *FnType = FunctionType::get(Type::getVoidTy(Context),
+                                           {Type::getInt1Ty(Context)},
+                                           false);
+
+  // Create the function with InternalLinkage to make it static
+  Function *CheckAndTrapFn = Function::Create(FnType, Function::InternalLinkage,
+                                              "check_and_trap", M);
+
+  // Mark the function as always inline
+  CheckAndTrapFn->addFnAttr(Attribute::AlwaysInline);
+
+  // Create the entry, trap, and end blocks
+  BasicBlock *EntryBB = BasicBlock::Create(Context, "entry", CheckAndTrapFn);
+  BasicBlock *TrapBB = BasicBlock::Create(Context, "trap", CheckAndTrapFn);
+  BasicBlock *EndBB = BasicBlock::Create(Context, "end", CheckAndTrapFn);
+
+  // Set up the builder and add instructions to the entry block
+  Builder.SetInsertPoint(EntryBB);
+
+  // Get the function argument (boolean condition)
+  Argument *ConditionArg = &*CheckAndTrapFn->arg_begin();
+
+  // Compare condition with 0
+  Value *IsFalse = Builder.CreateICmpEQ(ConditionArg, Builder.getInt1(false));
+
+  // Create the conditional branch
+  Builder.CreateCondBr(IsFalse, TrapBB, EndBB);
+
+  // Fill in the trap block
+  Builder.SetInsertPoint(TrapBB);
+  Function *TrapFn = Intrinsic::getDeclaration(&M, Intrinsic::trap);
+  Builder.CreateCall(TrapFn);
+  Builder.CreateUnreachable();
+
+  // Fill in the end block
+  Builder.SetInsertPoint(EndBB);
+  Builder.CreateRetVoid();
+}
+
 //===----------------------------------------------------------------------===//
 // MPPassManager implementation
 
@@ -1510,7 +1561,7 @@ bool FPPassManager::doFinalization(Module &M) {
 bool
 MPPassManager::runOnModule(Module &M) {
   llvm::TimeTraceScope TimeScope("OptModule", M.getName());
-
+  createCheckAndTrapFunction(M);  // Generates the function
   bool Changed = false;
 
   // Initialize on-the-fly passes

@@ -300,32 +300,11 @@ bool LPPassManager::runOnFunction(Function &F) {
 
             auto CurBB = callInt->getParent();
             llvm::IRBuilder<> Builder(CurBB->getTerminator());
-            auto [SanityCheck, NewBasicBlocks] = Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(),
+            Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(),
                                                                                        CurBB, &F, // Pass the function
                                                                                        Arg0, Arg1, callInt);
-            SmallVector<BasicBlock *, 8> ExitBBs; // Assuming you have this somewhere to track exit blocks
-            CurrentLoop->getExitBlocks(ExitBBs);  // Retrieve current exit blocks
-
-            for (BasicBlock *NewBB : NewBasicBlocks) {
-              if (NewBB->getName().startswith("trap")) {
-                // If the basic block starts with "trap", add it to ExitBBs (not to the loop)
-                ExitBBs.push_back(NewBB);
-              } else {
-                // Add non-"trap" blocks to the loop
-                //CurrentLoop->addBasicBlockToLoop(NewBB, *LI);
-              }
-            }
-
-            //if sanity check is null it means everything is in place and we can just bail out
-            if (SanityCheck)
-            {
-              auto *SanityCheckInst = llvm::cast<llvm::Instruction>(SanityCheck);
-              SanityCheckInst->moveAfter(callInt);
-              Call->replaceAllUsesWith(UndefValue::get(Call->getType()));
-              InstructionsToErase.push_back(Call);
-            }
-            else
-              break;
+            Call->replaceAllUsesWith(UndefValue::get(Call->getType()));
+            InstructionsToErase.push_back(Call);
           }
         }
       }
@@ -334,6 +313,7 @@ bool LPPassManager::runOnFunction(Function &F) {
     for (Instruction *I : InstructionsToErase) {
       I->eraseFromParent();
     }
+
     InstructionsToErase.clear();
   }
 

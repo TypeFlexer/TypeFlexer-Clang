@@ -450,15 +450,7 @@ static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Addre
     Value *SbxHeapBaseLoadedVal = nullptr;
 
     BasicBlock *CurrentBB = Builder->GetInsertBlock();
-    for (Instruction &I : *CurrentBB) {
-        if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
-            if (LI->getPointerOperand() == sbxHeapRange) {
-                SbxHeapRangeLoadedVal = LI;
-            } else if (LI->getPointerOperand() == sbxHeapBase) {
-                SbxHeapBaseLoadedVal = LI;
-            }
-        }
-    }
+
     if (!SbxHeapBaseLoadedVal) {
         SbxHeapBaseLoadedVal = Builder->CreateAlignedLoad(
                 llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
@@ -526,8 +518,10 @@ std::vector<BasicBlock *> EmitSanityCheckAndTrap(IRBuilderBase *Builder, Value *
 
     // Start inserting instructions from after the branch instruction (ConditionInstr->getNextNode)
     Instruction *FirstInstrToMove = ConditionInstr->getNextNode();
+    IRBuilder<> CurBBB(CurBB);
 
-    // Create a new IRBuilder for the SanityCheckBB
+    //EmitDynamicCheckBlocks(CurBBB, ConditionInstr, M_, CurFn);
+//    // Create a new IRBuilder for the SanityCheckBB
     IRBuilder<> NewBuilder(SanityCheckBB);
 
     if (FirstInstrToMove) {
@@ -629,15 +623,6 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_,
     IRBuilder<> Builder(CurrentBB);
     Builder.SetInsertPoint(TargetInstr->getNextNode());
 
-    for (Instruction &I : *CurrentBB) {
-        if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
-            if (LI->getPointerOperand() == sbxHeapRange) {
-                SbxHeapRangeLoadedVal = LI;
-            } else if (LI->getPointerOperand() == sbxHeapBase) {
-                SbxHeapBaseLoadedVal = LI;
-            }
-        }
-    }
 
     if (!SbxHeapBaseLoadedVal) {
         SbxHeapBaseLoadedVal = Builder.CreateAlignedLoad(
@@ -692,7 +677,8 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_,
                 }
             }
         } else {
-            std::vector<BasicBlock *> NewBlocks = EmitSanityCheckAndTrap(&Builder, ConditionVal, CurrentBB, CurFn);
+            std::vector<BasicBlock *> NewBlocks;
+            Builder.CreateCall(M_->getFunction("check_and_trap"), {ConditionVal});
             return std::make_tuple(nullptr, NewBlocks);
         }
     }
@@ -834,15 +820,7 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *Cu
     Value *SbxHeapBaseLoadedVal = nullptr;
 
     BasicBlock *CurrentBB = Builder->GetInsertBlock();
-    for (Instruction &I : *CurrentBB) {
-        if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
-            if (LI->getPointerOperand() == sbxHeapRange) {
-                SbxHeapRangeLoadedVal = LI;
-            } else if (LI->getPointerOperand() == sbxHeapBase) {
-                SbxHeapBaseLoadedVal = LI;
-            }
-        }
-    }
+
 
     if (!SbxHeapBaseLoadedVal) {
         SbxHeapBaseLoadedVal = Builder->CreateAlignedLoad(

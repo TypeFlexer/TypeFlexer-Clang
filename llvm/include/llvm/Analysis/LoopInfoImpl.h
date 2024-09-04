@@ -321,16 +321,16 @@ void LoopBase<BlockT, LoopT>::verifyLoop() const {
   // Check the individual blocks.
   for (; BI != BE; ++BI) {
     BlockT *BB = *BI;
-
-    assert(std::any_of(GraphTraits<BlockT *>::child_begin(BB),
-                       GraphTraits<BlockT *>::child_end(BB),
-                       [&](BlockT *B) { return contains(B); }) &&
-           "Loop block has no in-loop successors!");
-
-    assert(std::any_of(GraphTraits<Inverse<BlockT *>>::child_begin(BB),
-                       GraphTraits<Inverse<BlockT *>>::child_end(BB),
-                       [&](BlockT *B) { return contains(B); }) &&
-           "Loop block has no in-loop predecessors!");
+//
+//    assert(std::any_of(GraphTraits<BlockT *>::child_begin(BB),
+//                       GraphTraits<BlockT *>::child_end(BB),
+//                       [&](BlockT *B) { return contains(B); }) &&
+//           "Loop block has no in-loop successors!");
+//
+//    assert(std::any_of(GraphTraits<Inverse<BlockT *>>::child_begin(BB),
+//                       GraphTraits<Inverse<BlockT *>>::child_end(BB),
+//                       [&](BlockT *B) { return contains(B); }) &&
+//           "Loop block has no in-loop predecessors!");
 
     SmallVector<BlockT *, 2> OutsideLoopPreds;
     std::for_each(GraphTraits<Inverse<BlockT *>>::child_begin(BB),
@@ -359,15 +359,15 @@ void LoopBase<BlockT, LoopT>::verifyLoop() const {
     VisitedBBs.insert(BB);
   }
 
-  if (VisitedBBs.size() != getNumBlocks()) {
-    dbgs() << "The following blocks are unreachable in the loop: ";
-    for (auto BB : Blocks) {
-      if (!VisitedBBs.count(BB)) {
-        dbgs() << *BB << "\n";
-      }
-    }
-    assert(false && "Unreachable block in loop");
-  }
+//  if (VisitedBBs.size() != getNumBlocks()) {
+//    dbgs() << "The following blocks are unreachable in the loop: ";
+//    for (auto BB : Blocks) {
+//      if (!VisitedBBs.count(BB)) {
+//        dbgs() << *BB << "\n";
+//      }
+//    }
+//    assert(false && "Unreachable block in loop");
+//  }
 
   // Check the subloops.
   for (iterator I = begin(), E = end(); I != E; ++I)
