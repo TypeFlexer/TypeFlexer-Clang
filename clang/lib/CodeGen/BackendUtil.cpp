@@ -1017,6 +1017,13 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     llvm::TimeTraceScope TimeScope("PerModulePasses");
     PerModulePasses.run(*TheModule);
   }
+  legacy::PassManager InliningPassManager;
+
+  // Add the inlining pass with the desired parameters
+  InliningPassManager.add(llvm::createFunctionInliningPass(3, 2, false));  // OptLevel = 3, SizeOptLevel = 2
+
+  // Run the inlining pass on the module
+  InliningPassManager.run(*TheModule);
 
   {
     PrettyStackTraceString CrashInfo("Code generation");

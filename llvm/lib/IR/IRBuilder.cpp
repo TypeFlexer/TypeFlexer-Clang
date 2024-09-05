@@ -483,128 +483,12 @@ static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Addre
     return ConditionVal;
 }
 
-std::vector<BasicBlock *> EmitSanityCheckAndTrap(IRBuilderBase *Builder, Value *Condition, BasicBlock *CurBB, Function *CurFn) {
-    assert(Condition->getType()->isIntegerTy(1) && "Condition must be of boolean type (i1)");
-
-    // Create a vector to store the newly created basic blocks
-    std::vector<BasicBlock *> NewBasicBlocks;
-
-    // ----- Move instructions following the condition to the Sanity Check Block -----
-    Instruction *ConditionInstr = dyn_cast<Instruction>(Condition);
-    if (!ConditionInstr || ConditionInstr->getParent() != CurBB) {
-        return NewBasicBlocks;  // Return new blocks even if we encounter an issue
-    }
-
-    // Create the basic blocks for the sanity check (when Condition is true) and trap (when false).
-    LLVMContext &Context = CurFn->getContext();
-    BasicBlock *SanityCheckBB = BasicBlock::Create(Context, "sanityCheck", CurFn);
-    BasicBlock *TrapBB = BasicBlock::Create(Context, "trap", CurFn);
-
-    // Add the newly created blocks to the vector
-    NewBasicBlocks.push_back(SanityCheckBB);
-    NewBasicBlocks.push_back(TrapBB);
-
-    llvm::Value* OriginalTerminator = CurBB->getTerminator();
-
-    // Create a new IRBuilder for TrapBB
-    IRBuilder<> TrapBBBuilder(TrapBB);
-
-    // Get the llvm.trap intrinsic and call it in TrapBB
-    Function *TrapFn = Intrinsic::getDeclaration(CurFn->getParent(), Intrinsic::trap);
-    TrapBBBuilder.CreateCall(TrapFn);
-
-    // Emit unreachable to indicate the end of the trap block.
-    TrapBBBuilder.CreateUnreachable();
-
-    // Start inserting instructions from after the branch instruction (ConditionInstr->getNextNode)
-    Instruction *FirstInstrToMove = ConditionInstr->getNextNode();
-    IRBuilder<> CurBBB(CurBB);
-
-    //EmitDynamicCheckBlocks(CurBBB, ConditionInstr, M_, CurFn);
-//    // Create a new IRBuilder for the SanityCheckBB
-    IRBuilder<> NewBuilder(SanityCheckBB);
-
-    if (FirstInstrToMove) {
-        auto It = FirstInstrToMove->getIterator();
-
-        // Loop through the instructions in CurBB starting from the first instruction after the condition
-        while (It != CurBB->end()) {
-            Instruction &Inst = *It++;
-
-            // Remove the instruction from the original basic block
-            Inst.removeFromParent();
-
-            // Insert the instruction into the new basic block (SanityCheckBB)
-            NewBuilder.Insert(&Inst);
-        }
-    }
-
-    // ----- Find and store the call to c_licm_verify_addr in SanityCheckBB -----
-    Instruction *VerifyAddrCall = nullptr;
-
-    for (Instruction &Inst : *SanityCheckBB) {
-        if (CallInst *Call = dyn_cast<CallInst>(&Inst)) {
-            if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
-                // Store the reference to this call
-                VerifyAddrCall = Call;
-            }
-        }
-    }
-
-    // If we found the call to c_licm_verify_addr, erase it from the block
-    if (VerifyAddrCall) {
-        VerifyAddrCall->eraseFromParent();
-    }
-
-    IRBuilder<> CurBBBuilder(CurBB);
-    CurBBBuilder.SetInsertPoint(CurBB);
-
-    // Create the conditional branch instruction and add it to the end of CurBB
-    CurBBBuilder.CreateCondBr(Condition, SanityCheckBB, TrapBB);
-
-    if (CurFn->getName().str() == "quantum_sigma_y")
-        int a = 10;
-    // ----- Update PHI nodes -----
-    if (BranchInst *Br = dyn_cast<BranchInst>(OriginalTerminator)) {
-        // Loop over the successors (targets) of the branch instruction
-        for (unsigned i = 0; i < Br->getNumSuccessors(); ++i) {
-            BasicBlock *Succ = Br->getSuccessor(i);
-
-            // Iterate over the instructions in the successor block to find PHI nodes
-            for (Instruction &Inst : *Succ) {
-                if (PHINode *PN = dyn_cast<PHINode>(&Inst)) {
-                    // Find the index of CurBB in the PHI node's incoming blocks
-                    int Index = PN->getBasicBlockIndex(CurBB);
-
-                    // If CurBB is an incoming block, replace it with SanityCheckBB
-                    if (Index != -1) {
-                        PN->setIncomingBlock(Index, SanityCheckBB);
-                    }
-                }
-            }
-        }
-    }
-
-    // Return the list of newly created basic blocks (SanityCheckBB, TrapBB)
-    return NewBasicBlocks;
-}
-
-static std::tuple<Value *, std::vector<BasicBlock *>>
+static void
 EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_,
                                       llvm::BasicBlock *CurBB, llvm::Function *CurFn,
                                       Value *Address, Value *MaxIndex, Instruction *TargetInstr) {
     if (M_ == nullptr)
         M_ = Builders->GetInsertBlock()->getParent()->getParent();
-
-    // Metadata kind ID for the "SanityCheck" metadata
-    LLVMContext &Context = M_->getContext();
-    unsigned MDKindID = Context.getMDKindID("SanityCheck");
-
-    // Vector to store newly added instructions
-    std::vector<Instruction *> NewInstructions;
-
-    // Vector to store newly created basic blocks
-    std::vector<BasicBlock *> NewBasicBlocks;
 
     // Fetch global variables
     GlobalVariable *sbxHeapRange = M_->getNamedGlobal("sbxHeapRange");
@@ -612,7 +496,7 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_,
 
     if (!sbxHeapRange || !sbxHeapBase) {
         llvm::errs() << "Error: Global variable 'sbxHeapRange' or 'sbxHeapBase' not found!\n";
-        return std::make_tuple(nullptr, NewBasicBlocks);
+        return;
     }
 
     // Check if the global values are already loaded in the current basic block
@@ -627,22 +511,18 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_,
     if (!SbxHeapBaseLoadedVal) {
         SbxHeapBaseLoadedVal = Builder.CreateAlignedLoad(
                 llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
-        NewInstructions.push_back(cast<Instruction>(SbxHeapBaseLoadedVal));
     }
 
     if (!SbxHeapRangeLoadedVal) {
         SbxHeapRangeLoadedVal = Builder.CreateAlignedLoad(
                 llvm::Type::getInt64Ty(M_->getContext()), sbxHeapRange, llvm::Align(8), false);
-        NewInstructions.push_back(cast<Instruction>(SbxHeapRangeLoadedVal));
     }
 
     Value *OffsetValWithHeap = Builder.CreateAdd(SbxHeapBaseLoadedVal, Address);
-    NewInstructions.push_back(cast<Instruction>(OffsetValWithHeap));
 
     Value *OffsetValWithHeapPlusMaxIndex = nullptr;
     if (OffsetValWithHeap->getType()->getIntegerBitWidth() < 64) {
         OffsetValWithHeapPlusMaxIndex = Builder.CreateZExt(OffsetValWithHeap, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
-        NewInstructions.push_back(cast<Instruction>(OffsetValWithHeapPlusMaxIndex));
     } else {
         OffsetValWithHeapPlusMaxIndex = OffsetValWithHeap;
     }
@@ -652,20 +532,15 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_,
     if (!(ConstMaxIndex && ConstMaxIndex->isMinusOne())) {
         if (MaxIndex->getType()->getIntegerBitWidth() < 64) {
             MaxIndex = Builder.CreateZExt(MaxIndex, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
-            NewInstructions.push_back(cast<Instruction>(MaxIndex));
         }
 
         OffsetValWithHeapPlusMaxIndex = Builder.CreateAdd(OffsetValWithHeapPlusMaxIndex, MaxIndex, "SbxHeapRangePlusMaxIndex");
-        NewInstructions.push_back(cast<Instruction>(OffsetValWithHeapPlusMaxIndex));
     }
 
     Value *ConditionVal = Builder.CreateICmpULT(OffsetValWithHeapPlusMaxIndex, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
-    NewInstructions.push_back(cast<Instruction>(ConditionVal));
 
     Instruction *Term = CurrentBB->getTerminator();
     Value *ExistingTaintCheck = nullptr;
-    Value *ExistingTaintCheck2 = nullptr;
-    BasicBlock *NewSanityCheckBB = nullptr;
     BasicBlock *ExistingSanityCheckBB = nullptr;
 
     if (auto *Br = dyn_cast<BranchInst>(Term)) {
@@ -674,123 +549,22 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_,
             if (ExistingSanityCheckBB->getName().startswith("sanityCheck")) {
                 if (auto *SanityCheckBr = dyn_cast<BranchInst>(ExistingSanityCheckBB->getTerminator())) {
                     ExistingTaintCheck = SanityCheckBr->getCondition();
+                    IRBuilder<> SanityCheckBuilder(ExistingSanityCheckBB);
+                    SanityCheckBuilder.SetInsertPoint(ExistingSanityCheckBB->getTerminator());
+
+                    Value *CombinedCondition = SanityCheckBuilder.CreateAnd(ExistingTaintCheck, ConditionVal, "CombinedTaintCheck");
+                    SanityCheckBr->setCondition(CombinedCondition);
+                    return;
                 }
-            }
-        } else {
-            std::vector<BasicBlock *> NewBlocks;
-            Builder.CreateCall(M_->getFunction("check_and_trap"), {ConditionVal});
-            return std::make_tuple(nullptr, NewBlocks);
-        }
-    }
-
-    if (ExistingTaintCheck) {
-        IRBuilder<> SanityCheckBuilder(ExistingSanityCheckBB);
-        SanityCheckBuilder.SetInsertPoint(ExistingSanityCheckBB->getTerminator());
-
-        Value *CombinedCondition = SanityCheckBuilder.CreateAnd(ExistingTaintCheck, ConditionVal, "CombinedTaintCheck");
-        NewInstructions.push_back(cast<Instruction>(CombinedCondition));
-
-        if (auto *SanityCheckBr = dyn_cast<BranchInst>(ExistingSanityCheckBB->getTerminator())) {
-            SanityCheckBr->setCondition(CombinedCondition);
-        }
-    } else if (ExistingTaintCheck2) {
-        IRBuilder<> CurBBB(CurrentBB);
-        Instruction *ExistingTaintCheck2Instr = static_cast<Instruction *>(ExistingTaintCheck2);
-        CurBBB.SetInsertPoint(ExistingTaintCheck2Instr->getNextNode());
-
-        Value *CombinedCondition = CurBBB.CreateAnd(ExistingTaintCheck2, ConditionVal, "CombinedTaintCheck");
-
-        if (auto *CheckBr = dyn_cast<BranchInst>(CurrentBB->getTerminator())) {
-            CheckBr->setCondition(CombinedCondition);
-        }
-    } else {
-        NewSanityCheckBB = BasicBlock::Create(M_->getContext(), "sanityCheck", CurFn);
-        NewBasicBlocks.push_back(NewSanityCheckBB);  // Add to the list of new blocks
-
-        BasicBlock *NewTrapBB = BasicBlock::Create(M_->getContext(), "trap", CurFn);
-        NewBasicBlocks.push_back(NewTrapBB);  // Add to the list of new blocks
-
-        BasicBlock *OriginalTarget1 = nullptr;
-        BasicBlock *OriginalTarget2 = nullptr;
-
-        IRBuilder<> TrapBuilder(NewTrapBB);
-        Function *TrapFn = Intrinsic::getDeclaration(M_, Intrinsic::trap);
-        TrapBuilder.CreateCall(TrapFn);
-        TrapBuilder.CreateUnreachable();
-
-        if (auto *Ret = dyn_cast<ReturnInst>(Term)) {
-            IRBuilder<> Builder(Term);
-            BasicBlock *RetBB = BasicBlock::Create(M_->getContext(), "ret_block", CurFn);
-
-            IRBuilder<> RetBuilder(RetBB);
-            RetBuilder.CreateRet(Ret->getReturnValue());
-
-            IRBuilder<> SanityCheckBuilder(NewSanityCheckBB);
-            SanityCheckBuilder.CreateCondBr(ConditionVal, RetBB, NewTrapBB);
-
-            Builder.CreateBr(NewSanityCheckBB);
-            Ret->eraseFromParent();
-
-            OriginalTarget1 = RetBB;
-        }  else if (auto *Br = dyn_cast<BranchInst>(Term)) {
-            IRBuilder<> Builder(Term);
-            IRBuilder<> SanityCheckBuilder(NewSanityCheckBB);
-
-            if (Br->isConditional()) {
-                OriginalTarget1 = Br->getSuccessor(0);
-                OriginalTarget2 = Br->getSuccessor(1);
-                Builder.CreateCondBr(ConditionVal, NewSanityCheckBB, NewTrapBB);
-                SanityCheckBuilder.CreateCondBr(Br->getCondition(), OriginalTarget1, OriginalTarget2);
-            } else {
-                OriginalTarget1 = Br->getSuccessor(0);
-                Builder.CreateCondBr(ConditionVal, NewSanityCheckBB, NewTrapBB);
-                SanityCheckBuilder.CreateBr(OriginalTarget1);
-            }
-            Term->eraseFromParent();
-        }
-
-        if (OriginalTarget1) {
-            for (PHINode &PN : OriginalTarget1->phis()) {
-                int BBIndex = PN.getBasicBlockIndex(CurrentBB);
-                if (BBIndex != -1) {
-                    Value *IncomingValue = PN.getIncomingValue(BBIndex);
-                    PN.addIncoming(IncomingValue, NewSanityCheckBB);
-                    PN.removeIncomingValue(BBIndex, false);
-                }
-            }
-        }
-
-        if (OriginalTarget2) {
-            for (PHINode &PN : OriginalTarget2->phis()) {
-                int BBIndex = PN.getBasicBlockIndex(CurrentBB);
-                if (BBIndex != -1) {
-                    Value *IncomingValue = PN.getIncomingValue(BBIndex);
-                    PN.addIncoming(IncomingValue, NewSanityCheckBB);
-                    PN.removeIncomingValue(BBIndex, false);
-                }
-            }
-        }
-
-        for (PHINode &PN : NewTrapBB->phis()) {
-            int BBIndex = PN.getBasicBlockIndex(CurrentBB);
-            if (BBIndex != -1) {
-                Value *IncomingValue = PN.getIncomingValue(BBIndex);
-                PN.addIncoming(IncomingValue, NewSanityCheckBB);
-                PN.removeIncomingValue(BBIndex, false);
             }
         }
     }
 
-    // Attach the metadata tag to all new instructions
-    for (Instruction *Instr : NewInstructions) {
-        MDNode *SanityCheckMD = MDNode::get(Context, MDString::get(Context, "SanityCheck"));
-        Instr->setMetadata(MDKindID, SanityCheckMD);
-    }
-
-    return std::make_tuple(OffsetValWithHeap, NewBasicBlocks);
+    Builder.CreateCall(M_->getFunction("check_and_trap"), {ConditionVal});
+    return;
 }
 
-static std::tuple<Value*, std::vector<BasicBlock*>>
+static void
 EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *CurFn,
                           Value *Address, Value *MaxIndex) {
     if (M_ == nullptr)
@@ -798,13 +572,9 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *Cu
 
     // Metadata kind ID for the "SanityCheck" metadata
     LLVMContext &Context = M_->getContext();
-    unsigned MDKindID = Context.getMDKindID("SanityCheck");
 
     // Vector to store newly added instructions
     std::vector<Instruction *> NewInstructions;
-
-    // Vector to store newly added basic blocks
-    std::vector<BasicBlock*> NewBasicBlocks;
 
     // Fetch global variables
     GlobalVariable *sbxHeapRange = M_->getNamedGlobal("sbxHeapRange");
@@ -812,7 +582,7 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *Cu
 
     if (!sbxHeapRange || !sbxHeapBase) {
         llvm::errs() << "Error: Global variable 'sbxHeapRange' or 'sbxHeapBase' not found!\n";
-        return std::make_tuple(nullptr, NewBasicBlocks);  // Return empty tuple if globals are not found
+        return;
     }
 
     // Check if the global values are already loaded in the current basic block
@@ -820,7 +590,7 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *Cu
     Value *SbxHeapBaseLoadedVal = nullptr;
 
     BasicBlock *CurrentBB = Builder->GetInsertBlock();
-
+    IRBuilder<> CurBBB(CurrentBB);
 
     if (!SbxHeapBaseLoadedVal) {
         SbxHeapBaseLoadedVal = Builder->CreateAlignedLoad(
@@ -858,11 +628,9 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *Cu
     }
 
     Value *ConditionVal = Builder->CreateICmpULT(OffsetValWithHeapPlusMaxIndex, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
-    NewInstructions.push_back(cast<Instruction>(ConditionVal));
 
     Instruction *Term = CurrentBB->getTerminator();
     Value *ExistingTaintCheck = nullptr;
-    BasicBlock *NewSanityCheckBB = nullptr;
     BasicBlock *ExistingSanityCheckBB = nullptr;
 
     if (auto *Br = dyn_cast<BranchInst>(Term)) {
@@ -871,107 +639,20 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *Cu
             if (ExistingSanityCheckBB->getName().startswith("sanityCheck")) {
                 if (auto *SanityCheckBr = dyn_cast<BranchInst>(ExistingSanityCheckBB->getTerminator())) {
                     ExistingTaintCheck = SanityCheckBr->getCondition();
+                    IRBuilder<> SanityCheckBuilder(ExistingSanityCheckBB);
+
+                    SanityCheckBuilder.SetInsertPoint(ExistingSanityCheckBB->getTerminator());
+
+                    Value *CombinedCondition = SanityCheckBuilder.CreateAnd(ExistingTaintCheck, ConditionVal, "CombinedTaintCheck");
+                    SanityCheckBr->setCondition(CombinedCondition);
+                    return;
                 }
             }
         }
     }
 
-    if (ExistingTaintCheck) {
-        IRBuilder<> SanityCheckBuilder(ExistingSanityCheckBB);
-
-        SanityCheckBuilder.SetInsertPoint(ExistingSanityCheckBB->getTerminator());
-
-        Value *CombinedCondition = SanityCheckBuilder.CreateAnd(ExistingTaintCheck, ConditionVal, "CombinedTaintCheck");
-        NewInstructions.push_back(cast<Instruction>(CombinedCondition));
-
-        if (auto *CheckBr = dyn_cast<BranchInst>(CurrentBB->getTerminator())) {
-            CheckBr->setCondition(CombinedCondition);
-        }
-    } else {
-        NewSanityCheckBB = BasicBlock::Create(M_->getContext(), "sanityCheck", CurFn);
-        NewBasicBlocks.push_back(NewSanityCheckBB);  // Add to vector of new blocks
-
-        BasicBlock *NewTrapBB = BasicBlock::Create(M_->getContext(), "trap", CurFn);
-        NewBasicBlocks.push_back(NewTrapBB);  // Add to vector of new blocks
-
-        BasicBlock *OriginalTarget1 = nullptr;
-        BasicBlock *OriginalTarget2 = nullptr;
-
-        IRBuilder<> TrapBuilder(NewTrapBB);
-        Function *TrapFn = Intrinsic::getDeclaration(M_, Intrinsic::trap);
-        TrapBuilder.CreateCall(TrapFn);
-        TrapBuilder.CreateUnreachable();
-
-        if (auto *Ret = dyn_cast<ReturnInst>(Term)) {
-            IRBuilder<> Builder(Term);
-            BasicBlock *RetBB = BasicBlock::Create(M_->getContext(), "ret_block", CurFn);
-
-            IRBuilder<> RetBuilder(RetBB);
-            RetBuilder.CreateRet(Ret->getReturnValue());
-
-            IRBuilder<> SanityCheckBuilder(NewSanityCheckBB);
-            SanityCheckBuilder.CreateCondBr(ConditionVal, RetBB, NewTrapBB);
-
-            Builder.CreateBr(NewSanityCheckBB);
-            Ret->eraseFromParent();
-
-            OriginalTarget1 = RetBB;
-        } else if (auto *Br = dyn_cast<BranchInst>(Term)) {
-            IRBuilder<> Builder(Term);
-            IRBuilder<> SanityCheckBuilder(NewSanityCheckBB);
-
-            if (Br->isConditional()) {
-                OriginalTarget1 = Br->getSuccessor(0);
-                OriginalTarget2 = Br->getSuccessor(1);
-                Builder.CreateCondBr(ConditionVal, NewSanityCheckBB, NewTrapBB);
-                SanityCheckBuilder.CreateCondBr(Br->getCondition(), OriginalTarget1, OriginalTarget2);
-            } else {
-                OriginalTarget1 = Br->getSuccessor(0);
-                Builder.CreateCondBr(ConditionVal, NewSanityCheckBB, NewTrapBB);
-                SanityCheckBuilder.CreateBr(OriginalTarget1);
-            }
-            Term->eraseFromParent();
-        }
-
-        if (OriginalTarget1) {
-            for (PHINode &PN : OriginalTarget1->phis()) {
-                int BBIndex = PN.getBasicBlockIndex(CurrentBB);
-                if (BBIndex != -1) {
-                    Value *IncomingValue = PN.getIncomingValue(BBIndex);
-                    PN.addIncoming(IncomingValue, NewSanityCheckBB);
-                    PN.removeIncomingValue(BBIndex, false);
-                }
-            }
-        }
-
-        if (OriginalTarget2) {
-            for (PHINode &PN : OriginalTarget2->phis()) {
-                int BBIndex = PN.getBasicBlockIndex(CurrentBB);
-                if (BBIndex != -1) {
-                    Value *IncomingValue = PN.getIncomingValue(BBIndex);
-                    PN.addIncoming(IncomingValue, NewSanityCheckBB);
-                    PN.removeIncomingValue(BBIndex, false);
-                }
-            }
-        }
-
-        for (PHINode &PN : NewTrapBB->phis()) {
-            int BBIndex = PN.getBasicBlockIndex(CurrentBB);
-            if (BBIndex != -1) {
-                Value *IncomingValue = PN.getIncomingValue(BBIndex);
-                PN.addIncoming(IncomingValue, NewSanityCheckBB);
-                PN.removeIncomingValue(BBIndex, false);
-            }
-        }
-    }
-
-    // Attach the metadata tag to all new instructions
-    for (Instruction *Instr : NewInstructions) {
-        MDNode *SanityCheckMD = MDNode::get(Context, MDString::get(Context, "SanityCheck"));
-        Instr->setMetadata(MDKindID, SanityCheckMD);
-    }
-
-    return std::make_tuple(OffsetValWithHeap, NewBasicBlocks);  // Return tuple of value and new blocks
+    CurBBB.CreateCall(M_->getFunction("check_and_trap"), {ConditionVal});
+    return;
 }
 
 CallInst *IRBuilderBase::CreateFAddReduce(Value *Acc, Value *Src) {
@@ -1094,13 +775,13 @@ CallInst *IRBuilderBase::VerifyIndexableAddressFunc(Module* M, Value *Address, V
   return VerifyIndexableAddress(this, M, Address, MaxIndex);
 }
 
-std::tuple<Value*, std::vector<BasicBlock*>>
+void
 IRBuilderBase::Verify_Wasm_ptr(Module* M, llvm::Function* CurFn, Value *Address, Value *MaxIndex) {
     // Emit the sanity check and get the tuple result (Value* and vector<BasicBlock*>)
     return EmitWASM_SBX_sanity_check(this, M, CurFn, Address, MaxIndex);
 }
 
-std::tuple<Value*, std::vector<BasicBlock*>>
+void
 IRBuilderBase::Verify_Wasm_ptr_within_loop(Module* M, llvm::BasicBlock* CurBB, llvm::Function* CurFn,
                                            Value *Address, Value *MaxIndex, Instruction *TargetInstr) {
     // Emit the sanity check within the loop and get the tuple result (Value* and vector<BasicBlock*>)

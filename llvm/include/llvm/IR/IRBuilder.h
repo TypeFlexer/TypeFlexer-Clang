@@ -2754,10 +2754,10 @@ public:
 
     Value *AddWasm_condition(Module *M, Value *Address, Value *MaxIndex);
 
-    std::tuple<Value *, std::vector<BasicBlock *>>
+    void
     Verify_Wasm_ptr(Module *M, Function *CurFn, Value *Address, Value *MaxIndex);
 
-    std::tuple<Value *, std::vector<BasicBlock *>>
+    void
     Verify_Wasm_ptr_within_loop(Module *M, BasicBlock *CurBB, Function *CurFn, Value *Address, Value *MaxIndex, Instruction*);
 };
 
