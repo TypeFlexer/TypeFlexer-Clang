@@ -2752,7 +2752,7 @@ public:
 
     CallInst *VerifyIndexableAddressFunc(llvm::Module *M, Value*, Value*);
 
-    Value *AddWasm_condition(Module *M, Value *Address, Value *MaxIndex);
+    Value *AddWasm_condition(Module *M, Value *Address);
 
     void
     Verify_Wasm_ptr(Module *M, Function *CurFn, Value *Address, Value *MaxIndex);

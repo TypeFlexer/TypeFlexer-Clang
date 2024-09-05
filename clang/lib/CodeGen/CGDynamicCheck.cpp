@@ -586,6 +586,7 @@ void CodeGenFunction::EmitDynamicTaintedCacheCheckBlocks(Value *Condition, Value
 Value*
 CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool shouldCheckSanity) {
 
+
    if (!(CGM.getCodeGenOpts().wasmsbx || CGM.getCodeGenOpts().heapsbx))
      return NULL;
 
@@ -641,20 +642,10 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
      llvm::Type *DestTy = BitCastType;
      llvm::Type *DecoyedDestTy = BitCastType;
 
-     Value *ValidTPtrOffset = NULL;
      Value *ConditionVal = NULL;
 
      if (shouldCheckSanity)
      {
-//         GlobalVariable *sbxHeapRange = CGM.getModule().getNamedGlobal("sbxHeapRange");
-//         Value *SbxHeapRangeLoadedVal = Builder.CreateAlignedLoad(
-//                 llvm::Type::getInt32Ty(BaseAddr.getPointer()->getContext()),
-//                 sbxHeapRange, 8, false);
-//         if (!BaseAddr.getType()->getCoreElementType()->isFunctionTy()) {
-//             ValidTPtrOffset = OffsetVal32;
-//             ConditionVal = Builder.CreateICmpULT(ValidTPtrOffset, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
-//             EmitDynamicCheckBlocks(ConditionVal);
-
          // Assign the loaded or cast value to MaxIdx
          llvm::Value *MaxIdx = llvm::ConstantInt::get(llvm::Type::getInt64Ty(BaseAddr.getPointer()->getContext()),
                                                         -1, true);
@@ -682,7 +673,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
          if (!IsDuplicate) {
             if (auto *ConstInt = dyn_cast<ConstantInt>(MaxIdx))
                 if (ConstInt->isMinusOne())
-                    ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address, MaxIdx);
+                    ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
                 else
                     Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
             else

@@ -432,7 +432,7 @@ static CallInst *VerifyIndexableAddress(IRBuilderBase *Builder, Module *M_, Valu
   // Create and return the call instruction, which returns an i1
   return Builder->CreateCall(Decl, Ops);
 }
-static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
+static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Address) {
     if (M_ == nullptr)
         M_ = Builder->GetInsertBlock()->getParent()->getParent();
 
@@ -468,15 +468,6 @@ static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Addre
         OffsetValWithHeapPlusMaxIndex = Builder->CreateZExt(OffsetValWithHeap, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
     } else {
         OffsetValWithHeapPlusMaxIndex = OffsetValWithHeap;
-    }
-
-    auto *ConstMaxIndex = dyn_cast<ConstantInt>(MaxIndex);
-    // Check if MaxIndex is a constant with value -1
-    if (!(ConstMaxIndex && ConstMaxIndex->isMinusOne())) {
-        if (MaxIndex->getType()->getIntegerBitWidth() < 64)
-            MaxIndex = Builder->CreateZExt(MaxIndex, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
-
-        OffsetValWithHeapPlusMaxIndex = Builder->CreateAdd(OffsetValWithHeapPlusMaxIndex, MaxIndex, "SbxHeapRangePlusMaxIndex");
     }
 
     Value *ConditionVal = Builder->CreateICmpULT(OffsetValWithHeapPlusMaxIndex, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
@@ -788,9 +779,9 @@ IRBuilderBase::Verify_Wasm_ptr_within_loop(Module* M, llvm::BasicBlock* CurBB, l
     return EmitWASM_SBX_sanity_check_within_loop(this, M, CurBB, CurFn, Address, MaxIndex, TargetInstr);
 }
 
-Value *IRBuilderBase::AddWasm_condition(Module* M, Value *Address,Value *MaxIndex){
+Value *IRBuilderBase::AddWasm_condition(Module* M, Value *Address){
     //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
-    return addWasm_condition(this, M, Address, MaxIndex);
+    return addWasm_condition(this, M, Address);
 }
 
 CallInst *IRBuilderBase::CreateIntMinReduce(Value *Src, bool IsSigned) {
