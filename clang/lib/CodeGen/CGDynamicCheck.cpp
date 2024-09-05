@@ -660,7 +660,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
          bool IsDuplicate = false;
          for (llvm::Instruction &I : *CurrentBB) {
              if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-                 if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+                 if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
                      if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
                          IsDuplicate = true;
                          break;
@@ -681,7 +681,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
          }
 
          if (ConditionVal)
-            EmitDynamicCheckBlocks(ConditionVal);
+             EmitDynamicCheckBlocks(ConditionVal);
 
          if (DestTy->isTStructTy() || (DestTy->isPointerTy() && DestTy->getCoreElementType()->isTStructTy())) {
              DestTy = DecoyedDestTy = ChangeStructName(reinterpret_cast<StructType *>(DestTy));

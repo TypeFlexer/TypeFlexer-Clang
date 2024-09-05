@@ -4323,7 +4323,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
           // Check if the instruction is a call instruction
           if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
             // Check if the called function matches
-            if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+            if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
               // Check if the operands match
               if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
                 IsDuplicate = true;
@@ -4397,7 +4397,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       bool IsDuplicate = false;
       for (llvm::Instruction &I : *CurrentBB) {
         if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-          if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+          if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
             if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
               IsDuplicate = true;
               break;
@@ -4460,7 +4460,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       bool IsDuplicate = false;
       for (llvm::Instruction &I : *CurrentBB) {
         if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-          if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+          if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
             if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
               IsDuplicate = true;
               break;
@@ -4532,7 +4532,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       bool IsDuplicate = false;
       for (llvm::Instruction &I : *CurrentBB) {
         if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-          if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+          if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
             if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
               IsDuplicate = true;
               break;
@@ -4614,7 +4614,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       bool IsDuplicate = false;
       for (llvm::Instruction &I : *CurrentBB) {
         if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-          if (Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+          if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
             if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
               IsDuplicate = true;
               break;

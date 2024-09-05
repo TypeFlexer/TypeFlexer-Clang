@@ -432,6 +432,7 @@ static CallInst *VerifyIndexableAddress(IRBuilderBase *Builder, Module *M_, Valu
   // Create and return the call instruction, which returns an i1
   return Builder->CreateCall(Decl, Ops);
 }
+
 static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Address) {
     if (M_ == nullptr)
         M_ = Builder->GetInsertBlock()->getParent()->getParent();
@@ -447,14 +448,6 @@ static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Addre
 
     // Check if the global values are already loaded in the current basic block
     Value *SbxHeapRangeLoadedVal = nullptr;
-    Value *SbxHeapBaseLoadedVal = nullptr;
-
-    BasicBlock *CurrentBB = Builder->GetInsertBlock();
-
-    if (!SbxHeapBaseLoadedVal) {
-        SbxHeapBaseLoadedVal = Builder->CreateAlignedLoad(
-                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
-    }
 
     if (!SbxHeapRangeLoadedVal) {
         SbxHeapRangeLoadedVal = Builder->CreateAlignedLoad(
@@ -462,12 +455,24 @@ static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Addre
     }
 
 
-    Value *OffsetValWithHeap = Builder->CreateAdd(SbxHeapBaseLoadedVal, Address);
+    //Value *OffsetValWithHeap = Builder->CreateAdd(SbxHeapBaseLoadedVal, Address);
+    Value *OffsetValWithHeap = Address;
     Value *OffsetValWithHeapPlusMaxIndex = nullptr;
     if (OffsetValWithHeap->getType()->getIntegerBitWidth() < 64) {
         OffsetValWithHeapPlusMaxIndex = Builder->CreateZExt(OffsetValWithHeap, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
+        Value *ConditionVal = Builder->CreateICmpULT(OffsetValWithHeapPlusMaxIndex, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
+        return ConditionVal;
     } else {
         OffsetValWithHeapPlusMaxIndex = OffsetValWithHeap;
+    }
+
+    if (!isa<Instruction>(OffsetValWithHeapPlusMaxIndex) ||
+        !cast<Instruction>(OffsetValWithHeapPlusMaxIndex)->isBinaryOp() ||
+        cast<BinaryOperator>(OffsetValWithHeapPlusMaxIndex)->getOpcode() != Instruction::And) {
+
+        // Perform an AND operation with UINT32_MAX (0xFFFFFFFF)
+        Value *Mask = ConstantInt::get(llvm::Type::getInt64Ty(M_->getContext()), UINT32_MAX);
+        OffsetValWithHeapPlusMaxIndex = Builder->CreateAnd(OffsetValWithHeapPlusMaxIndex, Mask, "OffsetValMasked");
     }
 
     Value *ConditionVal = Builder->CreateICmpULT(OffsetValWithHeapPlusMaxIndex, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
@@ -492,24 +497,25 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_,
 
     // Check if the global values are already loaded in the current basic block
     Value *SbxHeapRangeLoadedVal = nullptr;
-    Value *SbxHeapBaseLoadedVal = nullptr;
+    //Value *SbxHeapBaseLoadedVal = nullptr;
 
     BasicBlock *CurrentBB = CurBB;
     IRBuilder<> Builder(CurrentBB);
     Builder.SetInsertPoint(TargetInstr->getNextNode());
 
 
-    if (!SbxHeapBaseLoadedVal) {
-        SbxHeapBaseLoadedVal = Builder.CreateAlignedLoad(
-                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
-    }
+//    if (!SbxHeapBaseLoadedVal) {
+//        SbxHeapBaseLoadedVal = Builder.CreateAlignedLoad(
+//                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
+//    }
 
     if (!SbxHeapRangeLoadedVal) {
         SbxHeapRangeLoadedVal = Builder.CreateAlignedLoad(
                 llvm::Type::getInt64Ty(M_->getContext()), sbxHeapRange, llvm::Align(8), false);
     }
 
-    Value *OffsetValWithHeap = Builder.CreateAdd(SbxHeapBaseLoadedVal, Address);
+    //Value *OffsetValWithHeap = Builder.CreateAdd(SbxHeapBaseLoadedVal, Address);
+    Value *OffsetValWithHeap = Address;
 
     Value *OffsetValWithHeapPlusMaxIndex = nullptr;
     if (OffsetValWithHeap->getType()->getIntegerBitWidth() < 64) {
@@ -578,16 +584,16 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *Cu
 
     // Check if the global values are already loaded in the current basic block
     Value *SbxHeapRangeLoadedVal = nullptr;
-    Value *SbxHeapBaseLoadedVal = nullptr;
+    //Value *SbxHeapBaseLoadedVal = nullptr;
 
     BasicBlock *CurrentBB = Builder->GetInsertBlock();
     IRBuilder<> CurBBB(CurrentBB);
 
-    if (!SbxHeapBaseLoadedVal) {
-        SbxHeapBaseLoadedVal = Builder->CreateAlignedLoad(
-                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
-        NewInstructions.push_back(cast<Instruction>(SbxHeapBaseLoadedVal));
-    }
+//    if (!SbxHeapBaseLoadedVal) {
+//        SbxHeapBaseLoadedVal = Builder->CreateAlignedLoad(
+//                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
+//        NewInstructions.push_back(cast<Instruction>(SbxHeapBaseLoadedVal));
+//    }
 
     if (!SbxHeapRangeLoadedVal) {
         SbxHeapRangeLoadedVal = Builder->CreateAlignedLoad(
@@ -595,7 +601,8 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *Cu
         NewInstructions.push_back(cast<Instruction>(SbxHeapRangeLoadedVal));
     }
 
-    Value *OffsetValWithHeap = Builder->CreateAdd(SbxHeapBaseLoadedVal, Address);
+    //Value *OffsetValWithHeap = Builder->CreateAdd(SbxHeapBaseLoadedVal, Address);
+    Value *OffsetValWithHeap = Address;
     NewInstructions.push_back(cast<Instruction>(OffsetValWithHeap));
 
     Value *OffsetValWithHeapPlusMaxIndex = nullptr;

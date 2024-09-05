@@ -649,6 +649,9 @@ bool LoopInvariantCodeMotion::runOnLoop(
     llvm::SmallVector<Instruction *, 8> ToErase;
     bool instrumentTaintSanity = true;
 
+    if (Preheader && Preheader->getParent()->getName().str() == "LBM_initializeSpecialCellsForChannel")
+        int a = 10;
+
     if (instrumentTaintSanity)
     {
         for (BasicBlock *BB : L->blocks()) {

@@ -128,7 +128,7 @@ void LPPassManager::markLoopAsDeleted(Loop &L) {
   }
 }
 
-void createCheckAndTrapFunction(Module &M) {
+static void createCheckAndTrapFunction(Module &M) {
   LLVMContext &Context = M.getContext();
   llvm::IRBuilder<> Builder(Context);
 
