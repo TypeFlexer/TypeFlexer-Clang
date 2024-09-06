@@ -674,10 +674,22 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
             if (auto *ConstInt = dyn_cast<ConstantInt>(MaxIdx))
                 if (ConstInt->isMinusOne())
                     ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
+                else {
+                    // Check the optimization level before calling the function
+                    if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+                        ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
+                    }
+                    else
+                        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+                }
+            else {
+                // Check the optimization level before calling the function
+                if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+                    ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
+                }
                 else
                     Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
-            else
-                Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+            }
          }
 
          if (ConditionVal)

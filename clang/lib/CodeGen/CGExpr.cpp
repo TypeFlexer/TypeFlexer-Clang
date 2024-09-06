@@ -4335,7 +4335,12 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
 
         // Only insert the call if it's not a duplicate
         if (!IsDuplicate) {
-          Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+          // Check the optimization level before calling the function
+          if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+            Builder.Verify_Wasm_ptr(&CGM.getModule(), Address, MaxIdx);
+          }
+          else
+            Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
         }
       }
     }
@@ -4408,7 +4413,12 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
 
       // Only insert the call if it's not a duplicate
       if (!IsDuplicate) {
-        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+        // Check the optimization level before calling the function
+        if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+          Builder.Verify_Wasm_ptr(&CGM.getModule(), Address, MaxIdx);
+        }
+        else
+          Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
       }
     }
 
@@ -4471,7 +4481,12 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
 
       // Only insert the call if it's not a duplicate
       if (!IsDuplicate) {
-        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+        // Check the optimization level before calling the function
+        if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+          Builder.Verify_Wasm_ptr(&CGM.getModule(), Address, MaxIdx);
+        }
+        else
+          Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
       }
     }
 
@@ -4543,7 +4558,12 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
 
       // If no duplicate found, insert the call
       if (!IsDuplicate) {
-        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+        // Check the optimization level before calling the function
+        if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+          Builder.Verify_Wasm_ptr(&CGM.getModule(), Address, MaxIdx);
+        }
+        else
+          Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
       }
     }
 
@@ -4625,7 +4645,12 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
 
       // If no duplicate found, insert the call
       if (!IsDuplicate) {
-        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+        // Check the optimization level before calling the function
+        if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+          Builder.Verify_Wasm_ptr(&CGM.getModule(), Address, MaxIdx);
+        }
+        else
+          Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
       }
     }
 

@@ -165,7 +165,6 @@ void LoopBase<BlockT, LoopT>::getExitEdges(
 template <class BlockT, class LoopT>
 BlockT *LoopBase<BlockT, LoopT>::getLoopPreheader() const {
   assert(!isInvalid() && "Loop not in a valid state!");
-
   // Keep track of nodes outside the loop branching to the header...
   BlockT *Out = getLoopPredecessor();
   if (!Out)
@@ -175,33 +174,15 @@ BlockT *LoopBase<BlockT, LoopT>::getLoopPreheader() const {
   if (!Out->isLegalToHoistInto())
     return nullptr;
 
-  // Check if the preheader has multiple exits.
+  // Make sure there is only one exit out of the preheader.
   typedef GraphTraits<BlockT *> BlockTraits;
   typename BlockTraits::ChildIteratorType SI = BlockTraits::child_begin(Out);
+  ++SI;
   if (SI != BlockTraits::child_end(Out))
     return nullptr; // Multiple exits from the block, must not be a preheader.
 
-  BlockT *FirstSuccessor = *SI;
-  ++SI;
-
-  if (SI == BlockTraits::child_end(Out)) {
-    // The predecessor has exactly one successor, so it is a preheader.
-    return Out;
-  }
-
-  // Check if there are exactly two successors.
-  BlockT *SecondSuccessor = *SI;
-  ++SI;
-
-  // Special case: SanityCheck block with one successor leading to the loop header and the other to trap.
-  if (Out->getName().startswith("sanityCheck") &&
-      ((FirstSuccessor->getName().startswith("trap") && getHeader() == SecondSuccessor) ||
-       (SecondSuccessor->getName().startswith("trap") && getHeader() == FirstSuccessor))) {
-    return Out;
-  }
-
-  // If none of the conditions are met, return nullptr.
-  return nullptr;
+  // The predecessor has exactly one successor, so it is a preheader.
+  return Out;
 }
 
 /// getLoopPredecessor - If the given loop's header has exactly one unique

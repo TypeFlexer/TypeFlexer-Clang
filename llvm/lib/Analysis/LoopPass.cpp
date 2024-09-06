@@ -27,6 +27,8 @@
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/Analysis/LazyValueInfo.h"
+#include "llvm/IR/ConstantRange.h"
 
 using namespace llvm;
 
@@ -47,6 +49,7 @@ public:
       : LoopPass(ID), OS(OS), Banner(Banner) {}
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.addRequired<LazyValueInfoWrapperPass>();
     AU.setPreservesAll();
   }
 
@@ -109,6 +112,7 @@ void LPPassManager::getAnalysisUsage(AnalysisUsage &Info) const {
   // become part of LPPassManager.
   Info.addRequired<LoopInfoWrapperPass>();
   Info.addRequired<DominatorTreeWrapperPass>();
+  Info.addRequired<LazyValueInfoWrapperPass>();
   Info.setPreservesAll();
 }
 
@@ -183,6 +187,8 @@ static void createCheckAndTrapFunction(Module &M) {
 bool LPPassManager::runOnFunction(Function &F) {
   createCheckAndTrapFunction(*F.getParent());  // Generates the function
   auto &LIWP = getAnalysis<LoopInfoWrapperPass>();
+  auto &LVI = getAnalysis<LazyValueInfoWrapperPass>().getLVI();
+
   LI = &LIWP.getLoopInfo();
   Module &M = *F.getParent();
 #if 0
@@ -340,33 +346,75 @@ bool LPPassManager::runOnFunction(Function &F) {
   if (F.getName().str() == "quantum_measure")
     int a = 10;
 
-  for (BasicBlock &BB : F) { // Iterate over all basic blocks in the function
-    for (Instruction &I : BB) {
-      if (auto *Call = dyn_cast<CallInst>(&I)) {
-        if (Function *Callee = Call->getCalledFunction()) {
-          if (Callee->getName() == "c_licm_verify_addr") {
-            CallInst* callInt = Call;
-            Value *Arg0 = callInt->getArgOperand(0);
-            Value *Arg1 = callInt->getArgOperand(1);
-
-            auto CurBB = callInt->getParent();
-            llvm::IRBuilder<> Builder(CurBB->getTerminator());
-            Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(),
-                                                                                       CurBB, &F, // Pass the function
-                                                                                       Arg0, Arg1, callInt);
-            Call->replaceAllUsesWith(UndefValue::get(Call->getType()));
-            InstructionsToErase.push_back(Call);
-          }
-        }
-      }
-    }
-
-    for (Instruction *I : InstructionsToErase) {
-      I->eraseFromParent();
-    }
-
-    InstructionsToErase.clear();
-  }
+//  for (BasicBlock &BB : F) { // Iterate over all basic blocks in the function
+//    for (Instruction &I : BB) {
+//      if (auto *Call = dyn_cast<CallInst>(&I)) {
+//        if (Function *Callee = Call->getCalledFunction()) {
+//          if (Callee->getName() == "c_licm_verify_addr") {
+//            // Get arguments from the call
+//            CallInst* callInt = Call;
+//            Value *Arg0 = callInt->getArgOperand(0);  // First arg (%1)
+//            Value *Arg1 = callInt->getArgOperand(1);  // Second arg (%idxprom)
+//
+//            // Get the parent basic block of the call instruction
+//            auto CurBB = callInt->getParent();
+//
+//            // Perform LVI on Arg1 (which is %idxprom)
+//            ConstantRange CR_idxprom = LVI.getConstantRange(Arg1, callInt);
+//            errs() << "Range for %idxprom: "; CR_idxprom.print(errs()); errs() << "\n";
+//
+//            // Now walk backward and find %add, %mul, and %add7
+//            Instruction *AddInst = nullptr, *MulInst = nullptr, *Add7Inst = nullptr;
+//
+//            for (auto &PrevI : llvm::reverse(BB)) {
+//              if (auto *BinOp = dyn_cast<BinaryOperator>(&PrevI)) {
+//                // Check for the operations (add, mul) leading to %idxprom
+//                if (BinOp->getOpcode() == Instruction::Add && BinOp == Arg1) {
+//                  Add7Inst = BinOp; // %add7
+//                } else if (BinOp->getOpcode() == Instruction::Mul) {
+//                  MulInst = BinOp; // %mul
+//                } else if (BinOp->getOpcode() == Instruction::Add) {
+//                  AddInst = BinOp; // %add
+//                }
+//              }
+//
+//              // Once we have all the relevant instructions, we can stop
+//              if (AddInst && MulInst && Add7Inst) {
+//                break;
+//              }
+//            }
+//
+//            // Perform LVI on %add, %mul, and %add7
+//            if (AddInst) {
+//              ConstantRange CR_add = LVI.getConstantRange(AddInst, callInt);
+//              errs() << "Range for %add: "; CR_add.print(errs()); errs() << "\n";
+//            }
+//            if (MulInst) {
+//              ConstantRange CR_mul = LVI.getConstantRange(MulInst, callInt);
+//              errs() << "Range for %mul: "; CR_mul.print(errs()); errs() << "\n";
+//            }
+//            if (Add7Inst) {
+//              ConstantRange CR_add7 = LVI.getConstantRange(Add7Inst, callInt);
+//              errs() << "Range for %add7: "; CR_add7.print(errs()); errs() << "\n";
+//            }
+//
+//            // Call a verification function (e.g., inserted instrumentation)
+//            llvm::IRBuilder<> Builder(CurBB->getTerminator());
+//            Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB, Arg0, Arg1, callInt);
+//
+//            // Replace the call with undef and mark for removal
+//            Call->replaceAllUsesWith(UndefValue::get(Call->getType()));
+//            InstructionsToErase.push_back(Call);
+//          }
+//        }
+//      }
+//    }
+//    for (Instruction *I : InstructionsToErase) {
+//      I->eraseFromParent();
+//    }
+//
+//    InstructionsToErase.clear();
+//  }
 
   // Finalization
   for (unsigned Index = 0; Index < getNumContainedPasses(); ++Index) {

@@ -480,9 +480,8 @@ static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Addre
 }
 
 static void
-EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_,
-                                      llvm::BasicBlock *CurBB, llvm::Function *CurFn,
-                                      Value *Address, Value *MaxIndex, Instruction *TargetInstr) {
+EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_, llvm::BasicBlock *CurBB, Value *Address,
+                                      Value *MaxIndex, Instruction *TargetInstr) {
     if (M_ == nullptr)
         M_ = Builders->GetInsertBlock()->getParent()->getParent();
 
@@ -562,8 +561,7 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_,
 }
 
 static void
-EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *CurFn,
-                          Value *Address, Value *MaxIndex) {
+EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
     if (M_ == nullptr)
         M_ = Builder->GetInsertBlock()->getParent()->getParent();
 
@@ -584,16 +582,9 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *Cu
 
     // Check if the global values are already loaded in the current basic block
     Value *SbxHeapRangeLoadedVal = nullptr;
-    //Value *SbxHeapBaseLoadedVal = nullptr;
 
     BasicBlock *CurrentBB = Builder->GetInsertBlock();
-    IRBuilder<> CurBBB(CurrentBB);
-
-//    if (!SbxHeapBaseLoadedVal) {
-//        SbxHeapBaseLoadedVal = Builder->CreateAlignedLoad(
-//                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
-//        NewInstructions.push_back(cast<Instruction>(SbxHeapBaseLoadedVal));
-//    }
+    llvm::Instruction* insertPoint = nullptr;
 
     if (!SbxHeapRangeLoadedVal) {
         SbxHeapRangeLoadedVal = Builder->CreateAlignedLoad(
@@ -649,7 +640,7 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, llvm::Function *Cu
         }
     }
 
-    CurBBB.CreateCall(M_->getFunction("check_and_trap"), {ConditionVal});
+    Builder->CreateCall(M_->getFunction("check_and_trap"), {ConditionVal});
     return;
 }
 
@@ -774,16 +765,16 @@ CallInst *IRBuilderBase::VerifyIndexableAddressFunc(Module* M, Value *Address, V
 }
 
 void
-IRBuilderBase::Verify_Wasm_ptr(Module* M, llvm::Function* CurFn, Value *Address, Value *MaxIndex) {
+IRBuilderBase::Verify_Wasm_ptr(Module* M, Value *Address, Value *MaxIndex) {
     // Emit the sanity check and get the tuple result (Value* and vector<BasicBlock*>)
-    return EmitWASM_SBX_sanity_check(this, M, CurFn, Address, MaxIndex);
+    return EmitWASM_SBX_sanity_check(this, M, Address, MaxIndex);
 }
 
 void
-IRBuilderBase::Verify_Wasm_ptr_within_loop(Module* M, llvm::BasicBlock* CurBB, llvm::Function* CurFn,
+IRBuilderBase::Verify_Wasm_ptr_within_loop(Module* M, llvm::BasicBlock* CurBB,
                                            Value *Address, Value *MaxIndex, Instruction *TargetInstr) {
     // Emit the sanity check within the loop and get the tuple result (Value* and vector<BasicBlock*>)
-    return EmitWASM_SBX_sanity_check_within_loop(this, M, CurBB, CurFn, Address, MaxIndex, TargetInstr);
+    return EmitWASM_SBX_sanity_check_within_loop(this, M, CurBB, Address, MaxIndex, TargetInstr);
 }
 
 Value *IRBuilderBase::AddWasm_condition(Module* M, Value *Address){

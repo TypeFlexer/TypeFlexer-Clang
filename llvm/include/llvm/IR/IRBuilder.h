@@ -2755,10 +2755,10 @@ public:
     Value *AddWasm_condition(Module *M, Value *Address);
 
     void
-    Verify_Wasm_ptr(Module *M, Function *CurFn, Value *Address, Value *MaxIndex);
+    Verify_Wasm_ptr(Module *M, Value *Address, Value *MaxIndex);
 
     void
-    Verify_Wasm_ptr_within_loop(Module *M, BasicBlock *CurBB, Function *CurFn, Value *Address, Value *MaxIndex, Instruction*);
+    Verify_Wasm_ptr_within_loop(Module *M, BasicBlock *CurBB, Value *Address, Value *MaxIndex, Instruction*);
 };
 
 /// This provides a uniform API for creating instructions and inserting
