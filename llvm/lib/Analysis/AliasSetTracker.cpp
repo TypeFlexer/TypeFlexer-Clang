@@ -456,6 +456,8 @@ void AliasSetTracker::addUnknown(Instruction *Inst) {
 }
 
 void AliasSetTracker::add(Instruction *I) {
+  if (!I->hasName())
+    return;
   // Dispatch to one of the other add methods.
   if (LoadInst *LI = dyn_cast<LoadInst>(I))
     return add(LI);

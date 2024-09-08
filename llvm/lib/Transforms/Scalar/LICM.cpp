@@ -90,6 +90,7 @@
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
+#include <queue>
 
 using namespace llvm;
 
@@ -220,7 +221,8 @@ private:
     Value *getLoopBound(BasicBlock *IncBlock, Loop *L);
 
     std::map<PHINode *, Value *>
-    getMaxRangesUsingLVI(const std::vector<PHINode *> &PhiNodes, LazyValueInfo *LVI, Instruction *CurLoc);
+    getMaxRangesUsingLVI(const std::vector<PHINode *> &PhiNodes, LazyValueInfo *LVI, Instruction *CurLoc,
+                         Loop *L, BasicBlock *Preheader, DominatorTree *DT);
 
     Value *DuplicateIndexSubexpressionWithMaxRanges(IRBuilder<> &Builder, Value *IndexSubexpression,
                                                     const std::map<llvm::PHINode *, llvm::Value *> &MaxRanges,
@@ -414,23 +416,366 @@ llvm::Value* DuplicateInstructionsOutsideLoop(
     return V;  // If it's not an instruction or already dominates the preheader, return it as is
 }
 
-llvm::Value* DuplicateInstructionsOutsideLoopWithMaxRanges(
+llvm::Value* TraverseUpToPHINode(llvm::Value *Op, llvm::BasicBlock *CurrentBB) {
+    llvm::Instruction *Inst = llvm::dyn_cast<llvm::Instruction>(Op);
+
+    // Traverse up as long as we are dealing with instructions
+    while (Inst) {
+        // If we hit a PHINode, return it
+        if (llvm::PHINode *Phi = llvm::dyn_cast<llvm::PHINode>(Inst)) {
+            llvm::errs() << "Found PHINode: " << *Phi << "\n";
+            return Phi;
+        }
+
+        // If the instruction is from a different basic block, stop the traversal
+        if (Inst->getParent() != CurrentBB) {
+            llvm::errs() << "Instruction moved out of current basic block: " << *Inst << "\n";
+            return nullptr;  // Stop traversal if we leave the current block
+        }
+
+        // If we hit a terminating instruction (e.g., load, store, call), stop the traversal
+        if (llvm::isa<llvm::LoadInst>(Inst) ||
+            llvm::isa<llvm::StoreInst>(Inst) ||
+            llvm::isa<llvm::CallInst>(Inst) ||
+            llvm::isa<llvm::ReturnInst>(Inst) ||
+            llvm::isa<llvm::AllocaInst>(Inst)) {
+            llvm::errs() << "Encountered a terminating instruction: " << *Inst << "\n";
+            return nullptr;  // Stop if we hit a terminating instruction
+        }
+
+        // Traverse the operands of the instruction
+        bool Traversed = false;
+        for (unsigned i = 0; i < Inst->getNumOperands(); ++i) {
+            llvm::Value *Operand = Inst->getOperand(i);
+
+            // If the operand is a constant, return it
+            if (llvm::Constant *Const = llvm::dyn_cast<llvm::Constant>(Operand)) {
+                llvm::errs() << "Encountered a constant: " << *Const << "\n";
+                return Const;  // Return the constant
+            }
+
+            // If the operand is another instruction, traverse it
+            if (llvm::Instruction *OperandInst = llvm::dyn_cast<llvm::Instruction>(Operand)) {
+                Inst = OperandInst;
+                Traversed = true;
+                break;
+            }
+        }
+
+        // If no operand was an instruction, we stop the traversal
+        if (!Traversed) {
+            llvm::errs() << "No more operands to traverse.\n";
+            break;
+        }
+    }
+
+    return nullptr;  // Return nullptr if no PHINode or constant was found
+}
+
+bool isIncrementingLoop(llvm::ICmpInst *ICmp) {
+    // Handle equality comparison case (icmp eq)
+    if (ICmp->getPredicate() == llvm::ICmpInst::ICMP_EQ) {
+        llvm::Value *Op0 = ICmp->getOperand(0);
+        llvm::Value *Op1 = ICmp->getOperand(1);
+
+        // Check if Op0 or Op1 is an add or sub instruction
+        if (llvm::Instruction *Op0Inst = llvm::dyn_cast<llvm::Instruction>(Op0)) {
+            // Check if the instruction is an add or sub
+            if (Op0Inst->getOpcode() == llvm::Instruction::Add) {
+                // Check if the second operand of add is a negative constant
+                if (llvm::ConstantInt *CI = llvm::dyn_cast<llvm::ConstantInt>(Op0Inst->getOperand(1))) {
+                    if (CI->isNegative()) {
+                        llvm::errs() << "Detected decrementing loop: add with negative constant.\n";
+                        return false;  // Decrementing loop
+                    }
+                }
+            } else if (Op0Inst->getOpcode() == llvm::Instruction::Sub) {
+                // Check if the second operand of sub is a positive constant
+                if (llvm::ConstantInt *CI = llvm::dyn_cast<llvm::ConstantInt>(Op0Inst->getOperand(1))) {
+                    if (!CI->isNegative()) {
+                        llvm::errs() << "Detected decrementing loop: sub with positive constant.\n";
+                        return false;  // Decrementing loop
+                    }
+                }
+            }
+        }
+
+        if (llvm::Instruction *Op1Inst = llvm::dyn_cast<llvm::Instruction>(Op1)) {
+            // Check if the instruction is an add or sub
+            if (Op1Inst->getOpcode() == llvm::Instruction::Add) {
+                // Check if the second operand of add is a negative constant
+                if (llvm::ConstantInt *CI = llvm::dyn_cast<llvm::ConstantInt>(Op1Inst->getOperand(1))) {
+                    if (CI->isNegative()) {
+                        llvm::errs() << "Detected decrementing loop: add with negative constant.\n";
+                        return false;  // Decrementing loop
+                    }
+                }
+            } else if (Op1Inst->getOpcode() == llvm::Instruction::Sub) {
+                // Check if the second operand of sub is a positive constant
+                if (llvm::ConstantInt *CI = llvm::dyn_cast<llvm::ConstantInt>(Op1Inst->getOperand(1))) {
+                    if (!CI->isNegative()) {
+                        llvm::errs() << "Detected decrementing loop: sub with positive constant.\n";
+                        return false;  // Decrementing loop
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    // Handle the case of SGT and SGE predicates
+    if (ICmp->getPredicate() == llvm::ICmpInst::ICMP_SGT || ICmp->getPredicate() == llvm::ICmpInst::ICMP_SGE) {
+        // If the compare instruction name doesn't start with "cmp.not"
+        if (!ICmp->getName().startswith("cmp.not")) {
+            llvm::errs() << "Detected a decrementing loop (SGT or SGE predicate).\n";
+            return false;  // Decrementing loop
+        }
+    }
+
+    // Handle the case of SLT and SLE predicates with "cmp.not" prefix
+    if (ICmp->getName().startswith("cmp.not") &&
+        (ICmp->getPredicate() == llvm::ICmpInst::ICMP_SLT || ICmp->getPredicate() == llvm::ICmpInst::ICMP_SLE)) {
+        llvm::errs() << "Detected a decrementing loop (cmp.not with SLT or SLE predicate).\n";
+        return false;  // Decrementing loop
+    }
+
+    // If none of the above checks indicate a decrementing loop, assume incrementing loop
+    llvm::errs() << "Loop is incrementing or cannot be determined as decrementing.\n";
+    return true;
+}
+
+// Helper function to perform DFS and find loop-bound instruction
+llvm::Instruction* FindLoopBoundInstruction(llvm::Instruction *Inst, llvm::Loop *L, llvm::BasicBlock *OptimalPreheader,
+                                            llvm::DominatorTree *DT) {
+    // Set to track visited instructions to avoid revisiting
+    std::set<llvm::Instruction*> Visited;
+    std::queue<llvm::Instruction*> Worklist;
+
+    llvm::Loop *ContainingLoop = L;
+
+    // Traverse up the loop hierarchy to find the correct loop that contains the instruction's parent basic block
+    while (ContainingLoop &&  ContainingLoop->getParentLoop() &&!ContainingLoop->contains(Inst->getParent())) {
+        ContainingLoop = ContainingLoop->getParentLoop();
+    }
+
+    // Get the latch block of the loop
+    llvm::BasicBlock *LatchBlock = ContainingLoop->getLoopLatch();
+
+    if (LatchBlock->getName().startswith("while"))
+        return nullptr; //we dont deal with while loops
+
+    while (LatchBlock) {
+        llvm::Instruction *Terminator = LatchBlock->getTerminator();
+        if (!Terminator) {
+            llvm::errs() << "No terminator found in latch block.\n";
+            return nullptr;
+        }
+
+        // Check if the terminator is a conditional branch
+        if (llvm::BranchInst *Branch = llvm::dyn_cast<llvm::BranchInst>(Terminator)) {
+            if (Branch->isConditional()) {
+                llvm::Value *Condition = Branch->getCondition();
+
+                // Check if the condition is an `icmp` instruction
+                if (llvm::ICmpInst *ICmp = llvm::dyn_cast<llvm::ICmpInst>(Condition)) {
+                    // Check if the name of the condition starts with "SandMem.TaintCheck"
+                    if (ICmp->getName().startswith("SandMem.TaintCheck")) {
+                        llvm::errs() << "Found SandMem.TaintCheck condition, continuing to the first label.\n";
+
+                        // Set the latch block to the first successor (first label) of the branch
+                        LatchBlock = Branch->getSuccessor(0);
+                        continue;  // Repeat the process with the new latch block
+                    } else {
+
+                        if (!isIncrementingLoop(ICmp))
+                            return nullptr; //we will handle decrementing loops later.
+
+                        // If we found the correct latch (doesn't start with "SandMem.TaintCheck"), process the condition
+                        llvm::Value *Op0 = ICmp->getOperand(0);
+                        llvm::Value *Op1 = ICmp->getOperand(1);
+
+                        // Determine which operand is the loop induction variable and which is the bound
+                        if (llvm::isa<llvm::PHINode>(Op0)) {
+                            llvm::errs() << "Found loop bound: " << *Op1 << " (Op1 is not PHI)\n";
+                            return llvm::dyn_cast<llvm::Instruction>(Op1);  // Return Op1 if Op0 is PHI
+                        } else if (llvm::isa<llvm::PHINode>(Op1)) {
+                            llvm::errs() << "Found loop bound: " << *Op0 << " (Op0 is not PHI)\n";
+                            return llvm::dyn_cast<llvm::Instruction>(Op0);  // Return Op0 if Op1 is PHI
+                        } else {
+                            llvm::Value *PhiOp0 = TraverseUpToPHINode(Op0, LatchBlock);
+                            llvm::Value *PhiOp1 = TraverseUpToPHINode(Op1, LatchBlock);
+
+                            if (PhiOp0 && llvm::isa<llvm::PHINode>(PhiOp0)) {
+                                llvm::errs() << "Found loop bound: " << *Op1 << " (Op1 is not PHI)\n";
+                                return llvm::dyn_cast<llvm::Instruction>(Op1);  // Return Op1 if Op0 is PHI
+                            } else if (PhiOp1 && llvm::isa<llvm::PHINode>(PhiOp1)) {
+                                llvm::errs() << "Found loop bound: " << *Op0 << " (Op0 is not PHI)\n";
+                                return llvm::dyn_cast<llvm::Instruction>(Op0);  // Return Op0 if Op1 is PHI
+                            }
+                            return nullptr;
+                        }
+                    }
+                }
+            }
+        }
+
+        // If no condition was found, exit
+        llvm::errs() << "No conditional branch found in latch block.\n";
+        return nullptr;
+    }
+
+    llvm::errs() << "No loop bound found.\n";
+    return nullptr;  // Return nullptr if no loop-bound instruction is found
+}
+
+llvm::Instruction* FindLoopBoundSCEVInstruction(llvm::PHINode *InductionVar, llvm::Loop *L, llvm::Function *CurFn, llvm::ScalarEvolution &SE) {
+    // Check if SCEV can reason about the loop's trip count
+    const llvm::SCEV *TripCount = SE.getBackedgeTakenCount(L);
+
+    if (llvm::isa<llvm::SCEVCouldNotCompute>(TripCount)) {
+        // SCEV couldn't compute the loop bound
+        llvm::errs() << "SCEV could not compute the trip count for the loop.\n";
+        return nullptr;
+    }
+
+    llvm::errs() << "Trip count computed by SCEV: " << *TripCount << "\n";
+
+    // Get the exiting blocks of the loop
+    SmallVector<llvm::BasicBlock *, 4> ExitingBlocks;
+    L->getExitingBlocks(ExitingBlocks);  // This fills the vector with exiting blocks
+
+    // Analyze the loop exit condition (this is where the icmp typically occurs)
+    for (llvm::BasicBlock *ExitingBB : ExitingBlocks) {
+        auto *TI = ExitingBB->getTerminator();
+        if (llvm::BranchInst *BI = llvm::dyn_cast<llvm::BranchInst>(TI)) {
+            if (llvm::ICmpInst *ICmp = llvm::dyn_cast<llvm::ICmpInst>(BI->getCondition())) {
+                llvm::errs() << "Found loop exit condition: " << *ICmp << "\n";
+                return ICmp;  // Return the icmp instruction that is likely the loop bound
+            }
+        }
+    }
+
+    // No clear loop bound found
+    llvm::errs() << "Could not find the loop exit condition.\n";
+    return nullptr;
+}
+
+bool CheckForCallInstInDependencies(
         llvm::Value *IndexExpr,
         llvm::Loop *L,
         llvm::BasicBlock *Preheader,
         llvm::DominatorTree *DT,
-        const std::map<llvm::PHINode *, llvm::Value *> &MaxRanges) {
-    llvm::IRBuilder<> Builder(Preheader->getTerminator());
+        const std::map<llvm::PHINode *, llvm::Value *> &MaxRanges,
+        llvm::LazyValueInfo *LVI, llvm::Function* CurFn,
+        ScalarEvolution* SE) {
+
+    // A helper function to find equivalent instructions in the preheader
+    auto FindEquivalentInstruction = [&](llvm::Instruction *Inst) -> llvm::Instruction* {
+        for (llvm::Instruction &PreheaderInst : *Preheader) {
+            // Compare instructions for equivalence
+            if (PreheaderInst.isIdenticalTo(Inst)) {
+                return &PreheaderInst;
+            }
+        }
+        return nullptr;
+    };
+
     // Handle PHINodes by querying the MaxRanges map
     if (llvm::PHINode *Phi = llvm::dyn_cast<llvm::PHINode>(IndexExpr)) {
         // Check if the PHINode is in the MaxRanges map
         auto It = MaxRanges.find(Phi);
         if (It != MaxRanges.end()) {
-            // Return the max range value for this PHINode
-            return It->second;
+            return true;  // No call found, continue
         } else {
-            LLVM_DEBUG(llvm::dbgs() << "No max range found for PHINode.\n");
-            return Phi;  // If not in the map, just return the original PHINode
+            LLVM_DEBUG(llvm::dbgs() << "No max range found for PHINode, trying LVI.\n");
+
+            // Fetch max range using LazyValueInfo
+            llvm::ConstantRange Range = LVI->getConstantRange(Phi, static_cast<llvm::Instruction *>(Phi));
+
+            // If the range is valid and no call instruction is involved, continue
+            if (!Range.isEmptySet() && !Range.getUpper().isAllOnesValue()) {
+                return true;
+            } else {
+                return true;  // If we cannot find a loop bound, assume it's safe
+            }
+        }
+    }
+
+    // Handle other instructions by traversing upwards until we find a PHINode
+    if (llvm::Instruction *Inst = llvm::dyn_cast<llvm::Instruction>(IndexExpr)) {
+        // Check if the instruction is inside the loop or does not dominate the preheader
+        if (L->contains(Inst->getParent()) || !DT->dominates(Inst, Preheader)) {
+            // Recursively check the operands first
+            llvm::SmallVector<llvm::Value*, 8> Operands(Inst->operand_values());
+
+            // Recursively process each operand and check for calls
+            for (llvm::Value *Operand : Operands) {
+                bool NoCallInstFound = CheckForCallInstInDependencies(Operand, L, Preheader, DT, MaxRanges, LVI, CurFn, SE);
+                if (!NoCallInstFound) {
+                    return false;  // Abort if a call instruction is found
+                }
+            }
+
+            // Check if this instruction is a CallInst
+            if (llvm::isa<llvm::CallInst>(Inst)) {
+                // If it's a CallInst, check if it's present in the preheader
+                llvm::Instruction *ExistingInst = FindEquivalentInstruction(Inst);
+                if (!ExistingInst) {
+                    llvm::errs() << "Error: Call instruction depends on one not already present in the preheader.\n";
+                    return false;  // CallInst not found in preheader
+                }
+            }
+
+            return true;  // No call instruction issues, continue
+        }
+    }
+
+    // If it's not an instruction or already dominates the preheader, assume it's safe
+    return true;
+}
+
+llvm::Value* DuplicateInstructionsOutsideLoopWithMaxRanges(
+        llvm::Value *IndexExpr,
+        llvm::Loop *L,
+        llvm::BasicBlock *Preheader,
+        llvm::DominatorTree *DT,
+        const std::map<llvm::PHINode *, llvm::Value *> &MaxRanges,
+        llvm::LazyValueInfo *LVI, llvm::Function* CurFn,
+        ScalarEvolution* SE) {  // Added LazyValueInfo argument
+    llvm::IRBuilder<> Builder(Preheader->getTerminator());
+
+    // A helper function to find equivalent instructions in the preheader
+    auto FindEquivalentInstruction = [&](llvm::Instruction *Inst) -> llvm::Instruction* {
+        for (llvm::Instruction &PreheaderInst : *Preheader) {
+            // Compare instructions for equivalence
+            if (PreheaderInst.isIdenticalTo(Inst)) {
+                return &PreheaderInst;
+            }
+        }
+        return nullptr;
+    };
+
+    // Handle PHINodes by querying the MaxRanges map
+    if (llvm::PHINode *Phi = llvm::dyn_cast<llvm::PHINode>(IndexExpr)) {
+        // Check if the PHINode is in the MaxRanges map
+        auto It = MaxRanges.find(Phi);
+        if (It != MaxRanges.end()) {
+            return DuplicateInstructionsOutsideLoop(It->second, Builder, L,
+                                                    Preheader, DT);
+        } else {
+            LLVM_DEBUG(llvm::dbgs() << "No max range found for PHINode, trying LVI.\n");
+
+            // Fetch max range using LazyValueInfo
+            llvm::ConstantRange Range = LVI->getConstantRange(Phi, static_cast<llvm::Instruction *>(Phi));
+
+            // If the range is invalid or gives us -1, treat it as a failure and fallback to loop analysis
+            if (!Range.isEmptySet() && !Range.getUpper().isAllOnesValue()) {
+                llvm::Constant *MaxRangeValue = llvm::ConstantInt::get(Phi->getType(), Range.getUpper());
+                return MaxRangeValue;
+            } else {
+                return Phi;  // If we cannot find a loop bound, return the original PHINode
+            }
         }
     }
 
@@ -444,7 +789,7 @@ llvm::Value* DuplicateInstructionsOutsideLoopWithMaxRanges(
 
             // Recursively process each operand and duplicate it if necessary
             for (llvm::Value *Operand : Operands) {
-                llvm::Value *NewOperand = DuplicateInstructionsOutsideLoopWithMaxRanges(Operand, L, Preheader, DT, MaxRanges);
+                llvm::Value *NewOperand = DuplicateInstructionsOutsideLoopWithMaxRanges(Operand, L, Preheader, DT, MaxRanges, LVI, CurFn, SE);
                 NewOperands.push_back(NewOperand);
             }
 
@@ -766,7 +1111,7 @@ Value *LoopInvariantCodeMotion::getLoopBound(BasicBlock *IncBlock, Loop *L) {
 
 std::map<PHINode *, Value *>
 LoopInvariantCodeMotion::getMaxRangesUsingLVI(const std::vector<PHINode *> &PhiNodes, LazyValueInfo *LVI,
-                                              Instruction *CurLoc)
+                                              Instruction *CurLoc, Loop *L, BasicBlock *Preheader, DominatorTree *DT)
 {
     // Map to store the PHINode and its corresponding max range value
     std::map<PHINode *, Value *> MaxRanges;
@@ -794,21 +1139,90 @@ LoopInvariantCodeMotion::getMaxRangesUsingLVI(const std::vector<PHINode *> &PhiN
             // Get the upper bound of the constant range
             APInt UpperBound = CR.getUpper();
 
-            // Convert the upper bound to an LLVM constant
-            auto MaxRangeValue = ConstantInt::get(Phi->getType(), UpperBound.getLimitedValue());
+            // Get the bit-width of the integer type (e.g., 32 for i32)
+            unsigned BitWidth = UpperBound.getBitWidth();
 
-            // Store the PHINode and its corresponding max range in the map
-            MaxRanges[Phi] = MaxRangeValue;
+            // Check for the signed full integer range
+            APInt IntMin = APInt::getSignedMinValue(BitWidth);
+            APInt IntMax = APInt::getSignedMaxValue(BitWidth);
 
-            LLVM_DEBUG(dbgs() << "Max range for PHINode computed and stored.\n");
+            // Ensure that the range is not the full signed integer range (e.g., [-2147483648, 2147483647) for i32)
+            if (UpperBound != IntMax && CR.getLower() != IntMin) {
+                // If not the full range, compute the max range and store it
+                auto MaxRangeValue = ConstantInt::get(Phi->getType(), UpperBound.getLimitedValue());
+
+                // Store the PHINode and its corresponding max range in the map
+                MaxRanges[Phi] = MaxRangeValue;
+
+                LLVM_DEBUG(dbgs() << "Max range for PHINode computed and stored.\n");
+            } else {
+                // Log and retry finding the loop bound instruction if the range covers the full signed range
+                LLVM_DEBUG(dbgs() << "PHINode has a full signed range, retrying with loop bound analysis.\n");
+
+                // Retry finding the loop bound with instruction-based analysis
+                llvm::Instruction *LoopBoundInst = FindLoopBoundInstruction(static_cast<llvm::Instruction*>(Phi), L, Preheader, DT);
+                if (LoopBoundInst) {
+                    MaxRanges[Phi] = LoopBoundInst;
+                    LLVM_DEBUG(dbgs() << "Loop bound found and stored for PHINode.\n");
+                } else {
+                    LLVM_DEBUG(dbgs() << "Failed to find loop bound for PHINode.\n");
+                }
+            }
         } else {
-            // Log that the PHINode remains unbounded even after retrying
-            LLVM_DEBUG(dbgs() << "PHINode still has an unbounded range after retrying.\n");
+            // Log that the PHINode remains unbounded and retry using the loop bound instruction
+            LLVM_DEBUG(dbgs() << "PHINode has an unbounded range, retrying with loop bound analysis.\n");
+
+            // Retry finding the loop bound with instruction-based analysis
+            llvm::Instruction *LoopBoundInst = FindLoopBoundInstruction(static_cast<llvm::Instruction*>(Phi), L, Preheader, DT);
+            if (LoopBoundInst) {
+                MaxRanges[Phi] = LoopBoundInst;
+                LLVM_DEBUG(dbgs() << "Loop bound found and stored for PHINode.\n");
+            } else {
+                LLVM_DEBUG(dbgs() << "Failed to find loop bound for PHINode.\n");
+            }
         }
     }
 
     // Return the map containing all PHINodes and their corresponding max range values
     return MaxRanges;
+}
+bool isWhileLoop(Loop *L) {
+    // Get the name of the loop header
+    StringRef HeaderName = L->getHeader()->getName();
+
+    // Check if the header's name starts with "while.body"
+    if (HeaderName.startswith("while.body")) {
+        return true;
+    }
+
+    return false;
+}
+
+bool isAvailableInBlock(BasicBlock *BB, Value *NewIndexExpr, DominatorTree *DT) {
+    // Iterate through instructions in the basic block
+    for (Instruction &Inst : *BB) {
+        // Check if NewIndexExpr is the instruction itself
+        if (&Inst == NewIndexExpr) {
+            return true; // NewIndexExpr is defined within the basic block
+        }
+    }
+
+    // If not found, check if there's a terminator
+    Instruction *Terminator = BB->getTerminator();
+    if (Terminator) {
+        // Check if NewIndexExpr dominates the terminator
+        if (DT->dominates(NewIndexExpr, Terminator)) {
+            return true; // NewIndexExpr dominates the terminator
+        }
+    } else {
+        // If there's no terminator, check if NewIndexExpr dominates the entire block
+        if (DT->dominates(static_cast<Instruction*>(NewIndexExpr), BB)) {
+            return true; // NewIndexExpr dominates the entire block
+        }
+    }
+
+    // If none of the conditions are met, return false
+    return false;
 }
 
 /// Hoist expressions out of the specified loop. Note, alias info for inner
@@ -857,9 +1271,16 @@ bool LoopInvariantCodeMotion::runOnLoop(
     Instruction *VerifyAddrCall = nullptr;
 
 
-    if (Preheader && Preheader->getParent()->getName().str() == "initialize_quantum_reg")
-        int a = 10;
-    auto VerifyAddrCalls = eliminateRedundantVerifyAddrCalls(L, SafetyInfo, CurAST.get(), MSSAU.get(), true);
+    if (Preheader && Preheader->getParent()->getName().str() == "bignum_init")
+        return false;
+
+    if (OptimalPreheader && OptimalPreheader->getName().str() == "for.body.lr.ph")
+        int b = 100;
+//#define DEBUG_SANITY_CHECK
+    bool is_while_loop = isWhileLoop(L);
+
+    auto VerifyAddrCalls = eliminateRedundantVerifyAddrCalls(L, SafetyInfo,
+                                                             CurAST.get(), MSSAU.get(), !is_while_loop);
 
     for (auto VerifyAddrCallPair: VerifyAddrCalls) {
         VerifyAddrCall = VerifyAddrCallPair.second;
@@ -884,7 +1305,7 @@ bool LoopInvariantCodeMotion::runOnLoop(
                 std::vector<PHINode *> PhiNodes = {CallIndVarPhi};
 
                 // Call the getMaxRangesUsingLVI function
-                auto MaxRanges = getMaxRangesUsingLVI(PhiNodes, LVI, VerifyAddrCall);
+                auto MaxRanges = getMaxRangesUsingLVI(PhiNodes, LVI, VerifyAddrCall,L, OptimalPreheader, DT);
 
 
                 Value *Address = VerifyAddrCall->getOperand(0);
@@ -899,13 +1320,23 @@ bool LoopInvariantCodeMotion::runOnLoop(
                     }
                 }
 
-                llvm::Value *NewIndexExpr = DuplicateInstructionsOutsideLoopWithMaxRanges(
-                        CallIndVar, L, OptimalPreheader, DT, MaxRanges);
+                llvm::Value *NewIndexExpr = CallIndVar;
+                if (CheckForCallInstInDependencies(
+                        CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE))
+                {
+                    NewIndexExpr = DuplicateInstructionsOutsideLoopWithMaxRanges(
+                            CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE);
+                }
 
                 // If LoopBound is of type i32, zero-extend it to i64
                 if (NewIndexExpr->getType()->isIntegerTy(32)) {
-                    NewIndexExpr = Builder.CreateZExt(NewIndexExpr, Builder.getInt64Ty(), "loopbound.zext");
+                    NewIndexExpr = Builder.CreateSExt(NewIndexExpr, Builder.getInt64Ty(), "loopbound.zext");
                 }
+                Instruction *LastInstInPreheader = OptimalPreheader->getTerminator();
+
+
+                if (!isAvailableInBlock(OptimalPreheader, NewIndexExpr, DT))
+                    continue;
 
                 // Create the new call using the VerifyIndexableAddressFunc method
                 Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(), Address, NewIndexExpr);
@@ -916,136 +1347,171 @@ bool LoopInvariantCodeMotion::runOnLoop(
             }
         }
         else {
-            // Fallback: Traverse backwards from the loop increment block to find the loop bound load
-            BasicBlock *IncBlock = L->getLoopLatch();
-            LoopBoundPhiNode = getLoopBound(IncBlock, L);
-            Value* LoopBound = LoopBoundPhiNode;
-            // If we successfully obtained the loop bound, proceed with the transformation
-            if (LoopBoundPhiNode) {
-                Value *CallIndVar = nullptr;
-                // Check if VerifyAddrCall is valid and has at least one operand
-                if (VerifyAddrCall && VerifyAddrCall->getNumOperands() > 0) {
-                    // Safely access the first operand
-                    CallIndVar = VerifyAddrCall->getOperand(0);
+            Value *CallIndVar = nullptr;
+            // Check if VerifyAddrCall is valid and has at least one operand
+            if (VerifyAddrCall && VerifyAddrCall->getNumOperands() > 0) {
+                // Safely access the first operand
+                CallIndVar = VerifyAddrCall->getOperand(0);
 
-                    // If there is more than one operand, access the second one
-                    if (VerifyAddrCall->getNumOperands() > 1) {
-                        CallIndVar = VerifyAddrCall->getOperand(1);
-                    }
+                // If there is more than one operand, access the second one
+                if (VerifyAddrCall->getNumOperands() > 1) {
+                    CallIndVar = VerifyAddrCall->getOperand(1);
+                }
 
-                    // Proceed with the rest of the code, using CallIndVar...
+                // Proceed with the rest of the code, using CallIndVar...
+            } else {
+                llvm::errs() << "Error: VerifyAddrCall is null or has no operands.\n";
+                continue;
+            }
+
+            std::vector<PHINode *> CallIndVarPhis = FindPhiNodesUpwards(CallIndVar);
+            std::map<PHINode *, Value *>  MaxRanges = getMaxRangesUsingLVI(CallIndVarPhis, LVI, VerifyAddrCall,L, OptimalPreheader, DT);
+            IRBuilder<> Builder(OptimalPreheader->getTerminator());
+
+            if (MaxRanges.size() < CallIndVarPhis.size()) {
+#ifndef DEBUG_SANITY_CHECK
+                llvm::outs() << "Could not optimize function : "
+                             << CurFn->getName() << " for the call " << *VerifyAddrCall;
+                CallInst *callInt = dyn_cast<CallInst>(VerifyAddrCall);
+                Value *Arg0 = callInt->getArgOperand(0);
+                Value *Arg1 = callInt->getArgOperand(1);
+
+
+                auto CurBB = VerifyAddrCall->getParent();
+                Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB,
+                                                    Arg0, Arg1, VerifyAddrCall);
+                // Remove the original VerifyAddrCall from the for.body block
+                VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
+                eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
+                VerifyAddrCall = nullptr;
+#endif
+                continue;
+            }
+
+            llvm::Value *NewIndexExpr = CallIndVar;
+            if (CheckForCallInstInDependencies(
+                    CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE))
+            {
+                NewIndexExpr = DuplicateInstructionsOutsideLoopWithMaxRanges(
+                        CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE);
+            }
+
+            if (!dyn_cast<Instruction>(NewIndexExpr))
+            {
+#ifndef DEBUG_SANITY_CHECK
+                llvm::outs() << "Could not optimize function : "
+                             << CurFn->getName() << " for the call " << *VerifyAddrCall;
+                CallInst *callInt = dyn_cast<CallInst>(VerifyAddrCall);
+                Value *Arg0 = callInt->getArgOperand(0);
+                Value *Arg1 = callInt->getArgOperand(1);
+
+
+                auto CurBB = VerifyAddrCall->getParent();
+                Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB,
+                                                    Arg0, Arg1, VerifyAddrCall);
+                // Remove the original VerifyAddrCall from the for.body block
+                VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
+                eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
+                VerifyAddrCall = nullptr;
+#endif
+                continue;
+            }
+
+            // If LoopBound is of type i32, zero-extend it to i64
+            if (NewIndexExpr->getType()->isIntegerTy(32)) {
+                NewIndexExpr = Builder.CreateSExt(NewIndexExpr, Builder.getInt64Ty(), "loopbound.zext");
+            }
+
+            // Get the first argument of the original call
+            Value *Address = VerifyAddrCall->getOperand(0);
+            llvm::Value *MaxRangeIndexSubexpression = nullptr;
+            // Now, ensure all upward dependencies of the max ranges are duplicated outside the loop
+//            for (auto &PhiMaxRangePair: MaxRanges) {
+//                llvm::PHINode *PhiNode = PhiMaxRangePair.first;
+//                llvm::Value *MaxRangeValue = PhiMaxRangePair.second;
+//
+//                // Duplicate all dependencies of the max range value outside the loop
+//                llvm::Value *DuplicatedMaxRangeValue = DuplicateInstructionsOutsideLoop(MaxRangeValue,
+//                                                                                        Builder, L,
+//                                                                                        OptimalPreheader,
+//                                                                                        DT);
+//
+//                // Replace the original max range value with the duplicated one in the max range map
+//                if (DuplicatedMaxRangeValue != MaxRangeValue) {
+//                    MaxRanges[PhiNode] = DuplicatedMaxRangeValue;
+//                }
+//            }
+
+            // Duplicate the index subexpression with max ranges
+            MaxRangeIndexSubexpression = NewIndexExpr;
+            Value* LoopBound = MaxRangeIndexSubexpression; //loop bound is now the consolidate subexpression
+
+            // Safely cast Address to llvm::Instruction
+            llvm::Instruction *AddrInst = dyn_cast<llvm::Instruction>(Address);
+            if (!AddrInst) {
+                llvm::errs() << "Error: dyn_cast failed for Address.\n";
+                continue;
+            }
+
+//            if (L->contains(dyn_cast<Instruction>(LoopBound))) {
+//                LoopBound = DuplicateInstructionsOutsideLoop(LoopBound, Builder, L, OptimalPreheader,
+//                                                                        DT);
+//            }
+            if (llvm::Instruction *LoopBoundInst = llvm::dyn_cast<llvm::Instruction>(LoopBound)) {
+                // Check if LoopBound is already contained within the preheader block
+                if (LoopBoundInst->getParent() == OptimalPreheader) {
+                    llvm::errs() << "LoopBound is already contained in the OptimalPreheader.\n";
+                }
+                    // Otherwise, check if LoopBound dominates the preheader
+                else if (DT->dominates(LoopBoundInst, OptimalPreheader->getTerminator())) {
+                    llvm::errs() << "LoopBound dominates the preheader.\n";
+                }
+                    // If neither condition is met, we must handle it appropriately
+                else {
+                    llvm::errs() << "LoopBound neither dominates nor is contained in the preheader.\n";
+                    continue;
+                }
+            }
+
+            // Proceed with AddrInst...
+            // Duplicating the instruction or performing other actions
+            llvm::Value *DuplicatedAddress = DuplicateInstructionsOutsideLoop(AddrInst, Builder, L,
+                                                                              OptimalPreheader, DT);
+
+            if (!DuplicatedAddress) {
+                llvm::errs() << "Error: Failed to duplicate Address.\n";
+                continue;
+            }
+
+            // If LoopBound is a pointer, load the value it points to and handle it accordingly
+            Instruction *LoadedVal = nullptr;
+
+            if (LoopBound->getType()->isPointerTy()) {
+                Type *PointedType = LoopBound->getType()->getPointerElementType();
+
+                if (PointedType->isIntegerTy(32)) {
+                    // Load as i32 and zero extend to i64
+                    LoadedVal = Builder.CreateLoad(PointedType, LoopBound, "loaded.loopbound");
+                    LoopBound = Builder.CreateSExt(LoadedVal, Builder.getInt64Ty(),
+                                                              "zext.loopbound");
+                } else if (PointedType->isIntegerTy(64)) {
+                    // Load as i64 directly
+                    LoadedVal = Builder.CreateLoad(PointedType, LoopBound, "loaded.loopbound");
+                    LoopBound = LoadedVal;
                 } else {
-                    llvm::errs() << "Error: VerifyAddrCall is null or has no operands.\n";
-                    continue;
+                    LoopBound = nullptr;
                 }
+            }
 
-                std::vector<PHINode *> CallIndVarPhis = FindPhiNodesUpwards(CallIndVar);
-                std::map<PHINode *, Value *>  MaxRanges = getMaxRangesUsingLVI(CallIndVarPhis, LVI, VerifyAddrCall);
-                IRBuilder<> Builder(OptimalPreheader->getTerminator());
+            if (LoopBound) {
+                // Create the new call using the VerifyIndexableAddressFunc method
+                Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(),
+                                        DuplicatedAddress,
+                                        LoopBound);
+                VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
+                eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
 
-
-                llvm::Value *NewIndexExpr = DuplicateInstructionsOutsideLoopWithMaxRanges(
-                        CallIndVar, L, OptimalPreheader, DT, MaxRanges);
-
-                // If LoopBound is of type i32, zero-extend it to i64
-                if (NewIndexExpr->getType()->isIntegerTy(32)) {
-                    NewIndexExpr = Builder.CreateZExt(NewIndexExpr, Builder.getInt64Ty(), "loopbound.zext");
-                }
-
-                // Get the first argument of the original call
-                Value *Address = VerifyAddrCall->getOperand(0);
-                llvm::Value *MaxRangeIndexSubexpression = nullptr;
-                // Now, ensure all upward dependencies of the max ranges are duplicated outside the loop
-                for (auto &PhiMaxRangePair: MaxRanges) {
-                    llvm::PHINode *PhiNode = PhiMaxRangePair.first;
-                    llvm::Value *MaxRangeValue = PhiMaxRangePair.second;
-
-                    // Duplicate all dependencies of the max range value outside the loop
-                    llvm::Value *DuplicatedMaxRangeValue = DuplicateInstructionsOutsideLoop(MaxRangeValue,
-                                                                                            Builder, L,
-                                                                                            OptimalPreheader,
-                                                                                            DT);
-
-                    // Replace the original max range value with the duplicated one in the max range map
-                    if (DuplicatedMaxRangeValue != MaxRangeValue) {
-                        MaxRanges[PhiNode] = DuplicatedMaxRangeValue;
-                    }
-                }
-
-                if (MaxRanges.size() < CallIndVarPhis.size()) {
-//                    llvm::outs() << "Could not resolve loop invariant induction variable in function : "
-//                                 << CurFn->getName() << " for the call " << VerifyAddrCall->getName();
-                    CallInst *callInt = dyn_cast<CallInst>(VerifyAddrCall);
-                    Value *Arg0 = callInt->getArgOperand(0);
-                    Value *Arg1 = callInt->getArgOperand(1);
-
-
-                    auto CurBB = VerifyAddrCall->getParent();
-                    Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB,
-                                                        Arg0, Arg1, VerifyAddrCall);
-                    // Remove the original VerifyAddrCall from the for.body block
-                    VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
-                    eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
-                    VerifyAddrCall = nullptr;
-                    continue;
-                }
-
-                // Duplicate the index subexpression with max ranges
-                MaxRangeIndexSubexpression = NewIndexExpr;
-                LoopBound = MaxRangeIndexSubexpression; //loop bound is now the consolidate subexpression
-
-                // Safely cast Address to llvm::Instruction
-                llvm::Instruction *AddrInst = dyn_cast<llvm::Instruction>(Address);
-                if (!AddrInst) {
-                    llvm::errs() << "Error: dyn_cast failed for Address.\n";
-                    continue;
-                }
-
-                if (L->contains(dyn_cast<Instruction>(LoopBound))) {
-                    LoopBound = DuplicateInstructionsOutsideLoop(LoopBound, Builder, L, OptimalPreheader,
-                                                                            DT);
-                }
-
-                // Proceed with AddrInst...
-                // Duplicating the instruction or performing other actions
-                llvm::Value *DuplicatedAddress = DuplicateInstructionsOutsideLoop(AddrInst, Builder, L,
-                                                                                  OptimalPreheader, DT);
-
-                if (!DuplicatedAddress) {
-                    llvm::errs() << "Error: Failed to duplicate Address.\n";
-                    continue;
-                }
-
-                // If LoopBound is a pointer, load the value it points to and handle it accordingly
-                Instruction *LoadedVal = nullptr;
-
-                if (LoopBound->getType()->isPointerTy()) {
-                    Type *PointedType = LoopBound->getType()->getPointerElementType();
-
-                    if (PointedType->isIntegerTy(32)) {
-                        // Load as i32 and zero extend to i64
-                        LoadedVal = Builder.CreateLoad(PointedType, LoopBound, "loaded.loopbound");
-                        LoopBound = Builder.CreateZExt(LoadedVal, Builder.getInt64Ty(),
-                                                                  "zext.loopbound");
-                    } else if (PointedType->isIntegerTy(64)) {
-                        // Load as i64 directly
-                        LoadedVal = Builder.CreateLoad(PointedType, LoopBound, "loaded.loopbound");
-                        LoopBound = LoadedVal;
-                    } else {
-                        LoopBound = nullptr;
-                    }
-                }
-
-                if (LoopBound) {
-                    // Create the new call using the VerifyIndexableAddressFunc method
-                    Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(),
-                                            DuplicatedAddress,
-                                            LoopBound);
-                    VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
-                    eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
-
-                    VerifyAddrCall = nullptr;
-                }
+                VerifyAddrCall = nullptr;
             }
         }
     }
@@ -1829,9 +2295,12 @@ bool llvm::canSinkOrHoistInst(Instruction &I, AAResults *AA, DominatorTree *DT,
     if (!LI->isUnordered())
       return false; // Don't sink/hoist volatile or ordered atomic loads!
 
+    if (!MSSA->getMemoryAccess(LI))
+      return false;
+
       // Handle sbxHeapRange special case:
       if (GlobalVariable *GV = dyn_cast<GlobalVariable>(LI->getOperand(0))) {
-          if (GV->getName() == "sbxHeapRange") {
+          if ((GV->getName() == "sbxHeapRange") || (GV->getName() == "sbxHeap")) {
               // Check if sbxHeapRange is modified within the loop.
               bool IsModified = false;
               for (BasicBlock *BB : CurLoop->blocks()) {

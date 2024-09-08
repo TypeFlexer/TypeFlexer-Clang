@@ -32,6 +32,7 @@
 #include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/ModuleSummaryIndex.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Verifier.h"
@@ -1017,6 +1018,47 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     llvm::TimeTraceScope TimeScope("PerModulePasses");
     PerModulePasses.run(*TheModule);
   }
+
+  // Add instrumentation to the module before invoking the inlining pass
+  std::vector<Instruction *> InstructionsToErase;  // To collect instructions to be erased later
+
+  for (Function &F : *TheModule) {
+    for (BasicBlock &BB : F) {
+      for (Instruction &I : BB) {
+        // Check if the instruction is a call instruction
+        if (auto *Call = dyn_cast<CallInst>(&I)) {
+          if (Function *Callee = Call->getCalledFunction()) {
+            // Check if the called function's name is "c_licm_verify_addr"
+            if (Callee->getName() == "c_licm_verify_addr") {
+              // Get the call instruction arguments
+              CallInst *callInt = Call;
+              Value *Arg0 = callInt->getArgOperand(0);  // First argument (%1)
+              Value *Arg1 = callInt->getArgOperand(1);  // Second argument (%idxprom)
+
+              // Get the parent basic block of the call instruction
+              BasicBlock *CurBB = callInt->getParent();
+
+              // Insert a verification function call (instrumentation)
+              llvm::IRBuilder<> Builder(CurBB->getTerminator());
+              Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB, Arg0, Arg1, callInt);
+
+              // Replace the call with undef and mark the instruction for removal
+              Call->replaceAllUsesWith(UndefValue::get(Call->getType()));
+              InstructionsToErase.push_back(Call);
+            }
+          }
+        }
+      }
+    }
+  }
+
+// Erase the marked instructions after instrumentation
+  for (Instruction *I : InstructionsToErase) {
+    I->eraseFromParent();
+  }
+
+  InstructionsToErase.clear();
+
   legacy::PassManager InliningPassManager;
 
   // Add the inlining pass with the desired parameters

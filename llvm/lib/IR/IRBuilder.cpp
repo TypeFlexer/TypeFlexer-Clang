@@ -414,6 +414,7 @@ static CallInst *fetchSbxHeapBound(IRBuilderBase *Builder, Module *M_){
   //create a call to this function
   return Builder->CreateCall(Decl);
 }
+//#define DEBUG_SANITY_CHECK
 
 static CallInst *VerifyIndexableAddress(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
   // If the module is not provided, get it from the current insertion point
@@ -456,7 +457,7 @@ static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Addre
 
 
     //Value *OffsetValWithHeap = Builder->CreateAdd(SbxHeapBaseLoadedVal, Address);
-    Value *OffsetValWithHeap = Address;
+    Value *OffsetValWithHeap = Builder->CreateAnd(Address, ConstantInt::get(Address->getType(), 0xFFFFFFFF));
     Value *OffsetValWithHeapPlusMaxIndex = nullptr;
     if (OffsetValWithHeap->getType()->getIntegerBitWidth() < 64) {
         OffsetValWithHeapPlusMaxIndex = Builder->CreateZExt(OffsetValWithHeap, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
@@ -482,6 +483,10 @@ static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Addre
 static void
 EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_, llvm::BasicBlock *CurBB, Value *Address,
                                       Value *MaxIndex, Instruction *TargetInstr) {
+#ifdef DEBUG_SANITY_CHECK
+
+    VerifyIndexableAddress(Builders, M_, Address, MaxIndex);
+#else
     if (M_ == nullptr)
         M_ = Builders->GetInsertBlock()->getParent()->getParent();
 
@@ -496,25 +501,22 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_, llvm:
 
     // Check if the global values are already loaded in the current basic block
     Value *SbxHeapRangeLoadedVal = nullptr;
-    //Value *SbxHeapBaseLoadedVal = nullptr;
+    Value *SbxHeapBaseLoadedVal = nullptr;
 
     BasicBlock *CurrentBB = CurBB;
     IRBuilder<> Builder(CurrentBB);
     Builder.SetInsertPoint(TargetInstr->getNextNode());
 
 
-//    if (!SbxHeapBaseLoadedVal) {
-//        SbxHeapBaseLoadedVal = Builder.CreateAlignedLoad(
-//                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
-//    }
-
     if (!SbxHeapRangeLoadedVal) {
         SbxHeapRangeLoadedVal = Builder.CreateAlignedLoad(
                 llvm::Type::getInt64Ty(M_->getContext()), sbxHeapRange, llvm::Align(8), false);
     }
+    SbxHeapBaseLoadedVal = Builder.CreateAlignedLoad(
+            llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
 
-    //Value *OffsetValWithHeap = Builder.CreateAdd(SbxHeapBaseLoadedVal, Address);
-    Value *OffsetValWithHeap = Address;
+
+    Value *OffsetValWithHeap = Builder.CreateAnd(Address, ConstantInt::get(Address->getType(), 0xFFFFFFFF));
 
     Value *OffsetValWithHeapPlusMaxIndex = nullptr;
     if (OffsetValWithHeap->getType()->getIntegerBitWidth() < 64) {
@@ -525,11 +527,10 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_, llvm:
 
     auto *ConstMaxIndex = dyn_cast<ConstantInt>(MaxIndex);
     // Check if MaxIndex is a constant with value -1
-    if (!(ConstMaxIndex && ConstMaxIndex->isMinusOne())) {
-        if (MaxIndex->getType()->getIntegerBitWidth() < 64) {
-            MaxIndex = Builder.CreateZExt(MaxIndex, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
-        }
-
+    if (ConstMaxIndex && ConstMaxIndex->isMinusOne()) {
+    }
+    else
+    {
         OffsetValWithHeapPlusMaxIndex = Builder.CreateAdd(OffsetValWithHeapPlusMaxIndex, MaxIndex, "SbxHeapRangePlusMaxIndex");
     }
 
@@ -558,10 +559,16 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_, llvm:
 
     Builder.CreateCall(M_->getFunction("check_and_trap"), {ConditionVal});
     return;
+#endif
 }
 
 static void
 EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
+
+#ifdef DEBUG_SANITY_CHECK
+
+    VerifyIndexableAddress(Builder, M_, Address, MaxIndex);
+#else
     if (M_ == nullptr)
         M_ = Builder->GetInsertBlock()->getParent()->getParent();
 
@@ -582,6 +589,7 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, Value *Address, Va
 
     // Check if the global values are already loaded in the current basic block
     Value *SbxHeapRangeLoadedVal = nullptr;
+    Value *sbxHeapBaseVal = nullptr;
 
     BasicBlock *CurrentBB = Builder->GetInsertBlock();
     llvm::Instruction* insertPoint = nullptr;
@@ -591,9 +599,11 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, Value *Address, Va
                 llvm::Type::getInt64Ty(M_->getContext()), sbxHeapRange, llvm::Align(8), false);
         NewInstructions.push_back(cast<Instruction>(SbxHeapRangeLoadedVal));
     }
+    sbxHeapBaseVal = Builder->CreateAlignedLoad(
+            llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
 
     //Value *OffsetValWithHeap = Builder->CreateAdd(SbxHeapBaseLoadedVal, Address);
-    Value *OffsetValWithHeap = Address;
+    Value *OffsetValWithHeap = Builder->CreateAnd(Address, ConstantInt::get(Address->getType(), 0xFFFFFFFF));
     NewInstructions.push_back(cast<Instruction>(OffsetValWithHeap));
 
     Value *OffsetValWithHeapPlusMaxIndex = nullptr;
@@ -606,12 +616,10 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, Value *Address, Va
 
     auto *ConstMaxIndex = dyn_cast<ConstantInt>(MaxIndex);
     // Check if MaxIndex is a constant with value -1
-    if (!(ConstMaxIndex && ConstMaxIndex->isMinusOne())) {
-        if (MaxIndex->getType()->getIntegerBitWidth() < 64) {
-            MaxIndex = Builder->CreateZExt(MaxIndex, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
-            NewInstructions.push_back(cast<Instruction>(MaxIndex));
-        }
-
+    if (ConstMaxIndex && ConstMaxIndex->isMinusOne()) {
+    }
+    else
+    {
         OffsetValWithHeapPlusMaxIndex = Builder->CreateAdd(OffsetValWithHeapPlusMaxIndex, MaxIndex, "SbxHeapRangePlusMaxIndex");
         NewInstructions.push_back(cast<Instruction>(OffsetValWithHeapPlusMaxIndex));
     }
@@ -642,6 +650,7 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, Value *Address, Va
 
     Builder->CreateCall(M_->getFunction("check_and_trap"), {ConditionVal});
     return;
+#endif
 }
 
 CallInst *IRBuilderBase::CreateFAddReduce(Value *Acc, Value *Src) {

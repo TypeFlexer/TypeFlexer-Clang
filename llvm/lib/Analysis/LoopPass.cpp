@@ -133,53 +133,69 @@ void LPPassManager::markLoopAsDeleted(Loop &L) {
 }
 
 static void createCheckAndTrapFunction(Module &M) {
-  LLVMContext &Context = M.getContext();
-  llvm::IRBuilder<> Builder(Context);
+    LLVMContext &Context = M.getContext();
+    llvm::IRBuilder<> Builder(Context);
 
-  // Check if the 'check_and_trap' function already exists in the module
-  if (Function *ExistingFn = M.getFunction("check_and_trap")) {
-    // If the function already exists, don't recreate it
-    return;
-  }
+    // Check if the 'check_and_trap' function already exists in the module
+    if (Function *ExistingFn = M.getFunction("check_and_trap")) {
+        // If the function already exists, don't recreate it
+        return;
+    }
 
-  // Create the function signature for the 'check_and_trap' function
-  FunctionType *FnType = FunctionType::get(Type::getVoidTy(Context),
-                                           {Type::getInt1Ty(Context)},
-                                           false);
+    // Create the function signature for the 'check_and_trap' function
+    FunctionType *FnType = FunctionType::get(Type::getVoidTy(Context),
+                                             {Type::getInt1Ty(Context)},
+                                             false);
 
-  // Create the function with InternalLinkage to make it static
-  Function *CheckAndTrapFn = Function::Create(FnType, Function::InternalLinkage,
-                                              "check_and_trap", M);
+    // Create the function with InternalLinkage to make it static
+    Function *CheckAndTrapFn = Function::Create(FnType, Function::InternalLinkage,
+                                                "check_and_trap", M);
 
-  // Mark the function as always inline
-  CheckAndTrapFn->addFnAttr(Attribute::AlwaysInline);
+    // Mark the function as always inline
+    CheckAndTrapFn->addFnAttr(Attribute::AlwaysInline);
 
-  // Create the entry, trap, and end blocks
-  BasicBlock *EntryBB = BasicBlock::Create(Context, "entry", CheckAndTrapFn);
-  BasicBlock *TrapBB = BasicBlock::Create(Context, "trap", CheckAndTrapFn);
-  BasicBlock *EndBB = BasicBlock::Create(Context, "end", CheckAndTrapFn);
+    // Create the entry, trap, and end blocks
+    BasicBlock *EntryBB = BasicBlock::Create(Context, "entry", CheckAndTrapFn);
+    BasicBlock *TrapBB = BasicBlock::Create(Context, "trap", CheckAndTrapFn);
+    BasicBlock *EndBB = BasicBlock::Create(Context, "end", CheckAndTrapFn);
 
-  // Set up the builder and add instructions to the entry block
-  Builder.SetInsertPoint(EntryBB);
+    // Set up the builder and add instructions to the entry block
+    Builder.SetInsertPoint(EntryBB);
 
-  // Get the function argument (boolean condition)
-  Argument *ConditionArg = &*CheckAndTrapFn->arg_begin();
+    // Get the function argument (boolean condition)
+    Argument *ConditionArg = &*CheckAndTrapFn->arg_begin();
 
-  // Compare condition with 0
-  Value *IsFalse = Builder.CreateICmpEQ(ConditionArg, Builder.getInt1(false));
+    // Compare condition with 0
+    Value *IsFalse = Builder.CreateICmpEQ(ConditionArg, Builder.getInt1(false));
 
-  // Create the conditional branch
-  Builder.CreateCondBr(IsFalse, TrapBB, EndBB);
+    // Create the conditional branch
+    Builder.CreateCondBr(IsFalse, TrapBB, EndBB);
 
-  // Fill in the trap block
-  Builder.SetInsertPoint(TrapBB);
-  Function *TrapFn = Intrinsic::getDeclaration(&M, Intrinsic::trap);
-  Builder.CreateCall(TrapFn);
-  Builder.CreateUnreachable();
+    // Fill in the trap block
+    Builder.SetInsertPoint(TrapBB);
 
-  // Fill in the end block
-  Builder.SetInsertPoint(EndBB);
-  Builder.CreateRetVoid();
+//    // Declare or get the printf function
+//    FunctionType *PrintfType = FunctionType::get(Builder.getInt32Ty(),
+//                                                 PointerType::get(Type::getInt8Ty(Context), 0),
+//                                                 true);
+//    FunctionCallee PrintfFn = M.getOrInsertFunction("printf", PrintfType);
+//
+//    // Create the format string: "trapping due to taint illegal\n"
+//    Value *Message = Builder.CreateGlobalStringPtr("trapping due to taint illegal\n");
+//
+//    // Call printf with the message
+//    Builder.CreateCall(PrintfFn, {Message});
+
+    // Call the trap intrinsic after printing
+    Function *TrapFn = Intrinsic::getDeclaration(&M, Intrinsic::trap);
+    Builder.CreateCall(TrapFn);
+
+    // Mark unreachable after trap
+    Builder.CreateUnreachable();
+
+    // Fill in the end block
+    Builder.SetInsertPoint(EndBB);
+    Builder.CreateRetVoid();
 }
 
 /// run - Execute all of the passes scheduled for execution.  Keep track of
@@ -341,80 +357,6 @@ bool LPPassManager::runOnFunction(Function &F) {
     // Pop the loop from queue after running all passes.
     LQ.pop_back();
   }
-
-  std::vector<Instruction *> InstructionsToErase;
-  if (F.getName().str() == "quantum_measure")
-    int a = 10;
-
-//  for (BasicBlock &BB : F) { // Iterate over all basic blocks in the function
-//    for (Instruction &I : BB) {
-//      if (auto *Call = dyn_cast<CallInst>(&I)) {
-//        if (Function *Callee = Call->getCalledFunction()) {
-//          if (Callee->getName() == "c_licm_verify_addr") {
-//            // Get arguments from the call
-//            CallInst* callInt = Call;
-//            Value *Arg0 = callInt->getArgOperand(0);  // First arg (%1)
-//            Value *Arg1 = callInt->getArgOperand(1);  // Second arg (%idxprom)
-//
-//            // Get the parent basic block of the call instruction
-//            auto CurBB = callInt->getParent();
-//
-//            // Perform LVI on Arg1 (which is %idxprom)
-//            ConstantRange CR_idxprom = LVI.getConstantRange(Arg1, callInt);
-//            errs() << "Range for %idxprom: "; CR_idxprom.print(errs()); errs() << "\n";
-//
-//            // Now walk backward and find %add, %mul, and %add7
-//            Instruction *AddInst = nullptr, *MulInst = nullptr, *Add7Inst = nullptr;
-//
-//            for (auto &PrevI : llvm::reverse(BB)) {
-//              if (auto *BinOp = dyn_cast<BinaryOperator>(&PrevI)) {
-//                // Check for the operations (add, mul) leading to %idxprom
-//                if (BinOp->getOpcode() == Instruction::Add && BinOp == Arg1) {
-//                  Add7Inst = BinOp; // %add7
-//                } else if (BinOp->getOpcode() == Instruction::Mul) {
-//                  MulInst = BinOp; // %mul
-//                } else if (BinOp->getOpcode() == Instruction::Add) {
-//                  AddInst = BinOp; // %add
-//                }
-//              }
-//
-//              // Once we have all the relevant instructions, we can stop
-//              if (AddInst && MulInst && Add7Inst) {
-//                break;
-//              }
-//            }
-//
-//            // Perform LVI on %add, %mul, and %add7
-//            if (AddInst) {
-//              ConstantRange CR_add = LVI.getConstantRange(AddInst, callInt);
-//              errs() << "Range for %add: "; CR_add.print(errs()); errs() << "\n";
-//            }
-//            if (MulInst) {
-//              ConstantRange CR_mul = LVI.getConstantRange(MulInst, callInt);
-//              errs() << "Range for %mul: "; CR_mul.print(errs()); errs() << "\n";
-//            }
-//            if (Add7Inst) {
-//              ConstantRange CR_add7 = LVI.getConstantRange(Add7Inst, callInt);
-//              errs() << "Range for %add7: "; CR_add7.print(errs()); errs() << "\n";
-//            }
-//
-//            // Call a verification function (e.g., inserted instrumentation)
-//            llvm::IRBuilder<> Builder(CurBB->getTerminator());
-//            Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB, Arg0, Arg1, callInt);
-//
-//            // Replace the call with undef and mark for removal
-//            Call->replaceAllUsesWith(UndefValue::get(Call->getType()));
-//            InstructionsToErase.push_back(Call);
-//          }
-//        }
-//      }
-//    }
-//    for (Instruction *I : InstructionsToErase) {
-//      I->eraseFromParent();
-//    }
-//
-//    InstructionsToErase.clear();
-//  }
 
   // Finalization
   for (unsigned Index = 0; Index < getNumContainedPasses(); ++Index) {
