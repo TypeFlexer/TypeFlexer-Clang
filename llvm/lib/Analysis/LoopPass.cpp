@@ -132,76 +132,9 @@ void LPPassManager::markLoopAsDeleted(Loop &L) {
   }
 }
 
-static void createCheckAndTrapFunction(Module &M) {
-    LLVMContext &Context = M.getContext();
-    llvm::IRBuilder<> Builder(Context);
-
-    // Check if the 'check_and_trap' function already exists in the module
-    if (Function *ExistingFn = M.getFunction("check_and_trap")) {
-        // If the function already exists, don't recreate it
-        return;
-    }
-
-    // Create the function signature for the 'check_and_trap' function
-    FunctionType *FnType = FunctionType::get(Type::getVoidTy(Context),
-                                             {Type::getInt1Ty(Context)},
-                                             false);
-
-    // Create the function with InternalLinkage to make it static
-    Function *CheckAndTrapFn = Function::Create(FnType, Function::InternalLinkage,
-                                                "check_and_trap", M);
-
-    // Mark the function as always inline
-    CheckAndTrapFn->addFnAttr(Attribute::AlwaysInline);
-
-    // Create the entry, trap, and end blocks
-    BasicBlock *EntryBB = BasicBlock::Create(Context, "entry", CheckAndTrapFn);
-    BasicBlock *TrapBB = BasicBlock::Create(Context, "trap", CheckAndTrapFn);
-    BasicBlock *EndBB = BasicBlock::Create(Context, "end", CheckAndTrapFn);
-
-    // Set up the builder and add instructions to the entry block
-    Builder.SetInsertPoint(EntryBB);
-
-    // Get the function argument (boolean condition)
-    Argument *ConditionArg = &*CheckAndTrapFn->arg_begin();
-
-    // Compare condition with 0
-    Value *IsFalse = Builder.CreateICmpEQ(ConditionArg, Builder.getInt1(false));
-
-    // Create the conditional branch
-    Builder.CreateCondBr(IsFalse, TrapBB, EndBB);
-
-    // Fill in the trap block
-    Builder.SetInsertPoint(TrapBB);
-
-//    // Declare or get the printf function
-//    FunctionType *PrintfType = FunctionType::get(Builder.getInt32Ty(),
-//                                                 PointerType::get(Type::getInt8Ty(Context), 0),
-//                                                 true);
-//    FunctionCallee PrintfFn = M.getOrInsertFunction("printf", PrintfType);
-//
-//    // Create the format string: "trapping due to taint illegal\n"
-//    Value *Message = Builder.CreateGlobalStringPtr("trapping due to taint illegal\n");
-//
-//    // Call printf with the message
-//    Builder.CreateCall(PrintfFn, {Message});
-
-    // Call the trap intrinsic after printing
-    Function *TrapFn = Intrinsic::getDeclaration(&M, Intrinsic::trap);
-    Builder.CreateCall(TrapFn);
-
-    // Mark unreachable after trap
-    Builder.CreateUnreachable();
-
-    // Fill in the end block
-    Builder.SetInsertPoint(EndBB);
-    Builder.CreateRetVoid();
-}
-
 /// run - Execute all of the passes scheduled for execution.  Keep track of
 /// whether any of the passes modifies the function, and if so, return true.
 bool LPPassManager::runOnFunction(Function &F) {
-  createCheckAndTrapFunction(*F.getParent());  // Generates the function
   auto &LIWP = getAnalysis<LoopInfoWrapperPass>();
   auto &LVI = getAnalysis<LazyValueInfoWrapperPass>().getLVI();
 

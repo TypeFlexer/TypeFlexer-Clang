@@ -446,7 +446,7 @@ static bool isBlockInLCSSAForm(const Loop &L, const BasicBlock &BB,
       if (UserBB != &BB && !L.contains(UserBB) &&
           DT.isReachableFromEntry(UserBB) &&
           !DT.dominates(UserBB, &BB))
-        return false;
+        return true;
     }
   }
   return true;

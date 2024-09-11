@@ -660,7 +660,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
          bool IsDuplicate = false;
          for (llvm::Instruction &I : *CurrentBB) {
              if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-                 if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+                 if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_verify_addr_wasmsbx") {
                      if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
                          IsDuplicate = true;
                          break;
@@ -680,7 +680,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
                         ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
                     }
                     else
-                        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+                        Builder.Verify_Wasm_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
                 }
             else {
                 // Check the optimization level before calling the function
@@ -688,7 +688,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
                     ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
                 }
                 else
-                    Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+                    Builder.Verify_Wasm_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
             }
          }
 
@@ -722,27 +722,58 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
 
     if (CGM.getCodeGenOpts().heapsbx)
     {
-     //First Fetch the global heap variables
-     GlobalVariable *lowerbound_1 = CGM.getModule().getNamedGlobal("lowerbound_1");
-     GlobalVariable *upperbound_1 =  CGM.getModule().getNamedGlobal("upperbound_1");
-     Value *lowerboundVal_1 = Builder.CreateAlignedLoad(
-         llvm::Type::getInt64Ty(PointerVal->getContext()),
-         lowerbound_1, 8, false);
-     Value *upperboundVal_1 = Builder.CreateAlignedLoad(
-         llvm::Type::getInt64Ty(PointerVal->getContext()),
-         upperbound_1, 8, false);
+        Value *PointerAsInt64 = Builder.CreatePtrToInt(BaseAddr.getPointer(),
+                                                       llvm::Type::getInt64Ty(PointerVal->getContext()));
+        Value *ConditionVal = NULL;
+        if (shouldCheckSanity)
+        {
+            // Assign the loaded or cast value to MaxIdx
+            llvm::Value *MaxIdx = llvm::ConstantInt::get(llvm::Type::getInt64Ty(BaseAddr.getPointer()->getContext()),
+                                                         -1, true);
 
-     Value *PointerAsInt64 = Builder.CreatePtrToInt(
-         BaseAddr.getPointer(),
-         llvm::Type::getInt64Ty(PointerVal->getContext()));
-     auto *UpperChk_1 = Builder.CreateICmpULE(PointerAsInt64, upperboundVal_1,
-                                      "IsoHeap.Cache_upper");
-     auto *LowerChk_1= Builder.CreateICmpUGE(PointerAsInt64, lowerboundVal_1,
-                                          "IsoHeap.Cache_lower");
-     llvm::Value *Condition_1 =
-         Builder.CreateAnd(LowerChk_1, UpperChk_1, "IsoHeap.cache_range_1");
-     EmitDynamicTaintedCacheCheckBlocks(Condition_1, PointerAsInt64);
-     return BaseAddr.getPointer();
+            // Convert the pointer (Addr) to an i64 integer type
+            llvm::Value *Address = PointerAsInt64;
+
+            // Get the current basic block
+            llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
+
+            // Check if there's a duplicate of the call in the current basic block
+            bool IsDuplicate = false;
+            for (llvm::Instruction &I : *CurrentBB) {
+                if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                    if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_verify_addr_heapsbx") {
+                        if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
+                            IsDuplicate = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Only insert the call if it's not a duplicate
+            if (!IsDuplicate) {
+                if (auto *ConstInt = dyn_cast<ConstantInt>(MaxIdx))
+                    if (ConstInt->isMinusOne())
+                        Builder.Verify_heap_ptr_no_optimization(&CGM.getModule(), Address, MaxIdx);
+                    else {
+                        // Check the optimization level before calling the function
+                        if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+                            Builder.Verify_heap_ptr_no_optimization(&CGM.getModule(), Address, MaxIdx);
+                        }
+                        else
+                            Builder.Verify_heap_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
+                    }
+                else {
+                    // Check the optimization level before calling the function
+                    if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+                        Builder.Verify_heap_ptr_no_optimization(&CGM.getModule(), Address, MaxIdx);
+                    }
+                    else
+                        Builder.Verify_heap_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
+                }
+            }
+        }
+        return BaseAddr.getPointer();
     }
 
     return nullptr;

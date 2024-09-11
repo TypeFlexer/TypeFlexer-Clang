@@ -187,6 +187,175 @@ CallInst *IRBuilderBase::CreateMemTransferInst(
   return CI;
 }
 
+static void createCheckAndTrapFunction_WASM_SBX(Module &M) {
+    LLVMContext &Context = M.getContext();
+    llvm::IRBuilder<> Builder(Context);
+
+    // Check if the 'iso_mem_check_and_trap' function already exists in the module
+    if (Function *ExistingFn = M.getFunction("iso_mem_check_and_trap")) {
+        // If the function already exists, don't recreate it
+        return;
+    }
+
+    // Create the function signature for the 'iso_mem_check_and_trap' function
+    FunctionType *FnType = FunctionType::get(Type::getVoidTy(Context),
+                                             {Type::getInt1Ty(Context)},
+                                             false);
+
+    // Create the function with InternalLinkage to make it static
+    Function *CheckAndTrapFn = Function::Create(FnType, Function::InternalLinkage,
+                                                "iso_mem_check_and_trap", M);
+
+    // Mark the function as always inline
+    CheckAndTrapFn->addFnAttr(Attribute::AlwaysInline);
+
+    // Create the entry, trap, and end blocks
+    BasicBlock *EntryBB = BasicBlock::Create(Context, "entry", CheckAndTrapFn);
+    BasicBlock *TrapBB = BasicBlock::Create(Context, "trap", CheckAndTrapFn);
+    BasicBlock *EndBB = BasicBlock::Create(Context, "end", CheckAndTrapFn);
+
+    // Set up the builder and add instructions to the entry block
+    Builder.SetInsertPoint(EntryBB);
+
+    // Get the function argument (boolean condition)
+    Argument *ConditionArg = &*CheckAndTrapFn->arg_begin();
+
+    // Compare condition with 0
+    Value *IsFalse = Builder.CreateICmpEQ(ConditionArg, Builder.getInt1(false));
+
+    // Create the conditional branch
+    Builder.CreateCondBr(IsFalse, TrapBB, EndBB);
+
+    // Fill in the trap block
+    Builder.SetInsertPoint(TrapBB);
+
+    // Call the trap intrinsic after printing
+    Function *TrapFn = Intrinsic::getDeclaration(&M, Intrinsic::trap);
+    Builder.CreateCall(TrapFn);
+
+    // Mark unreachable after trap
+    Builder.CreateUnreachable();
+
+    // Fill in the end block
+    Builder.SetInsertPoint(EndBB);
+    Builder.CreateRetVoid();
+}
+
+static void createOrGetCheckAndTrap_WASM_Function(IRBuilderBase &Builder, Module *M_, Value *ConditionVal) {
+    // Retrieve the function 'iso_mem_check_and_trap' from the module
+    Function *CheckAndTrapFn = M_->getFunction("iso_mem_check_and_trap");
+
+    // If the function doesn't exist, create it using createCheckAndTrapFunction_WASM_SBX
+    if (!CheckAndTrapFn) {
+        createCheckAndTrapFunction_WASM_SBX(*M_);
+        CheckAndTrapFn = M_->getFunction("iso_mem_check_and_trap");
+
+        // Ensure that the function is created correctly
+        if (!CheckAndTrapFn) {
+            llvm::errs() << "Error: Unable to find or create 'iso_mem_check_and_trap' function.\n";
+            return;
+        }
+    }
+
+    // Create a call to the 'iso_mem_check_and_trap' function with the provided ConditionVal
+    Builder.CreateCall(CheckAndTrapFn, {ConditionVal});
+}
+
+static void createCheckAndTrapFunctionHeapSBX(Module &M) {
+    LLVMContext &Context = M.getContext();
+    llvm::IRBuilder<> Builder(Context);
+
+    // Check if the 'iso_heap_check_and_trap' function already exists in the module
+    if (Function *ExistingFn = M.getFunction("iso_heap_check_and_trap")) {
+        return;
+    }
+
+    // Create the function signature for the 'iso_mem_check_and_trap' function
+    // Takes an i1 (boolean) condition and a pointer address (int64)
+    FunctionType *FnType = FunctionType::get(Type::getVoidTy(Context),
+                                             {Type::getInt1Ty(Context),
+                                              Type::getInt64Ty(Context)}, // Condition input and address
+                                             false);
+
+    // Create the function with InternalLinkage to make it static
+    Function *CheckAndTrapFn = Function::Create(FnType, Function::InternalLinkage,
+                                                "iso_heap_check_and_trap", M);
+
+    // Mark the function as always inline
+    CheckAndTrapFn->addFnAttr(Attribute::AlwaysInline);
+
+    // Create the entry, slowpath, trap, and end blocks
+    BasicBlock *EntryBB = BasicBlock::Create(Context, "entry", CheckAndTrapFn);
+    BasicBlock *SlowPathBB = BasicBlock::Create(Context, "slowpath", CheckAndTrapFn);
+    BasicBlock *TrapBB = BasicBlock::Create(Context, "trap", CheckAndTrapFn);
+    BasicBlock *EndBB = BasicBlock::Create(Context, "end", CheckAndTrapFn);
+
+    // Set up the builder and add instructions to the entry block
+    Builder.SetInsertPoint(EntryBB);
+
+    // Get the function arguments (i1 condition and pointer address)
+    Argument *ConditionArg = &*CheckAndTrapFn->arg_begin();
+    Argument *AddrArg = &*std::next(CheckAndTrapFn->arg_begin(), 1);
+
+    // Compare condition with false (0)
+    Value *IsFalse = Builder.CreateICmpEQ(ConditionArg, Builder.getInt1(false));
+
+    // Branch based on the condition check
+    Builder.CreateCondBr(IsFalse, SlowPathBB, EndBB);
+
+    // Handle the slow path (call the tainted memory check function)
+    Builder.SetInsertPoint(SlowPathBB);
+
+    // Module reference from the current insertion point
+    Module *M_ = Builder.GetInsertBlock()->getParent()->getParent();
+
+    // Cast AddrArg (int64) to i8* (void*)
+    Type *VoidPtrType = Type::getInt8PtrTy(Context);
+    Value *AddrArgAsVoidPtr = Builder.CreateIntToPtr(AddrArg, VoidPtrType, "addr_to_ptr");
+
+    // Set up the argument array (AddrArgAsVoidPtr is the source)
+    Value *Ops[] = {AddrArgAsVoidPtr};
+
+    // Get the declaration for the tainted memory check function
+    Function *TaintedMemCheckDecl = Intrinsic::SandboxTaintedMemCheckFunction(M_);
+
+    // Call the tainted memory check function
+    Builder.CreateCall(TaintedMemCheckDecl, Ops);
+
+    // After the call, return void
+    Builder.CreateRetVoid();
+
+    // Fill in the trap block
+    Builder.SetInsertPoint(TrapBB);
+    Function *TrapFn = Intrinsic::getDeclaration(&M, Intrinsic::trap);
+    Builder.CreateCall(TrapFn);
+    Builder.CreateUnreachable();
+
+    // Fill in the end block
+    Builder.SetInsertPoint(EndBB);
+    Builder.CreateRetVoid();
+}
+
+static void createOrGetCheckAndTrap_HEAP_Function(IRBuilderBase &Builder, Module *M_, Value *ConditionVal, Value* AddrArg) {
+    // Retrieve the function 'iso_mem_check_and_trap' from the module
+    Function *CheckAndTrapFn = M_->getFunction("iso_heap_check_and_trap");
+
+    // If the function doesn't exist, create it using createCheckAndTrapFunction_WASM_SBX
+    if (!CheckAndTrapFn) {
+        createCheckAndTrapFunctionHeapSBX(*M_);
+        CheckAndTrapFn = M_->getFunction("iso_heap_check_and_trap");
+
+        // Ensure that the function is created correctly
+        if (!CheckAndTrapFn) {
+            llvm::errs() << "Error: Unable to find or create 'iso_heap_check_and_trap' function.\n";
+            return;
+        }
+    }
+
+    // Create a call to the 'iso_mem_check_and_trap' function with the provided ConditionVal
+    Builder.CreateCall(CheckAndTrapFn, {ConditionVal, AddrArg});
+}
+
 CallInst *IRBuilderBase::CreateMemCpyInline(Value *Dst, MaybeAlign DstAlign,
                                             Value *Src, MaybeAlign SrcAlign,
                                             Value *Size) {
@@ -416,22 +585,40 @@ static CallInst *fetchSbxHeapBound(IRBuilderBase *Builder, Module *M_){
 }
 //#define DEBUG_SANITY_CHECK
 
-static CallInst *VerifyIndexableAddress(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
+static CallInst *Call_Verify_Addr_WASMSBX(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
   // If the module is not provided, get it from the current insertion point
   if (M_ == nullptr)
     M_ = Builder->GetInsertBlock()->getParent()->getParent();
 
   // Fetch the declaration for the intrinsic or function to check the address
-  auto *Decl = Intrinsic::VerifyIndexableAddress(M_);
+  auto *Decl = Intrinsic::Call_Verify_Addr_WASMSBX(M_);
 
   // Ensure that the declaration is of the correct function type
-  assert(Decl && "Intrinsic 'c_licm_verify_addr' not found!");
+  assert(Decl && "Intrinsic 'c_verify_addr_wasmsbx' not found!");
 
   // Create an array of the operands (Address and MaxIndex)
   Value *Ops[] = { Address, MaxIndex };
 
   // Create and return the call instruction, which returns an i1
   return Builder->CreateCall(Decl, Ops);
+}
+
+static CallInst *Call_Verify_Addr_HEAPSBX(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
+    // If the module is not provided, get it from the current insertion point
+    if (M_ == nullptr)
+        M_ = Builder->GetInsertBlock()->getParent()->getParent();
+
+    // Fetch the declaration for the intrinsic or function to check the address
+    auto *Decl = Intrinsic::Call_Verify_Addr_HEAPSBX(M_);
+
+    // Ensure that the declaration is of the correct function type
+    assert(Decl && "Intrinsic 'c_verify_addr_heapsbx' not found!");
+
+    // Create an array of the operands (Address and MaxIndex)
+    Value *Ops[] = { Address, MaxIndex };
+
+    // Create and return the call instruction, which returns an i1
+    return Builder->CreateCall(Decl, Ops);
 }
 
 static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Address) {
@@ -481,11 +668,11 @@ static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Addre
 }
 
 static void
-EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_, llvm::BasicBlock *CurBB, Value *Address,
+Call_Check_and_trap_WASMSBX_within_loop(IRBuilderBase *Builders, Module *M_, llvm::BasicBlock *CurBB, Value *Address,
                                       Value *MaxIndex, Instruction *TargetInstr) {
 #ifdef DEBUG_SANITY_CHECK
 
-    VerifyIndexableAddress(Builders, M_, Address, MaxIndex);
+    Call_Verify_Addr_WASMSBX(Builders, M_, Address, MaxIndex);
 #else
     if (M_ == nullptr)
         M_ = Builders->GetInsertBlock()->getParent()->getParent();
@@ -501,7 +688,6 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_, llvm:
 
     // Check if the global values are already loaded in the current basic block
     Value *SbxHeapRangeLoadedVal = nullptr;
-    Value *SbxHeapBaseLoadedVal = nullptr;
 
     BasicBlock *CurrentBB = CurBB;
     IRBuilder<> Builder(CurrentBB);
@@ -512,9 +698,6 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_, llvm:
         SbxHeapRangeLoadedVal = Builder.CreateAlignedLoad(
                 llvm::Type::getInt64Ty(M_->getContext()), sbxHeapRange, llvm::Align(8), false);
     }
-    SbxHeapBaseLoadedVal = Builder.CreateAlignedLoad(
-            llvm::Type::getInt64Ty(M_->getContext()), sbxHeapBase, llvm::Align(8), false);
-
 
     Value *OffsetValWithHeap = Builder.CreateAnd(Address, ConstantInt::get(Address->getType(), 0xFFFFFFFF));
 
@@ -556,18 +739,178 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_, llvm:
             }
         }
     }
-
-    Builder.CreateCall(M_->getFunction("check_and_trap"), {ConditionVal});
+    // Assuming Builder, M_, and ConditionVal are already defined
+    createOrGetCheckAndTrap_WASM_Function(Builder, M_, ConditionVal);
     return;
 #endif
 }
 
 static void
-EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
+Call_Check_and_trap_HEAPSBX_within_loop(IRBuilderBase *Builders, Module *M_, llvm::BasicBlock *CurBB, Value *Address,
+                                        Value *MaxIndex, Instruction *TargetInstr) {
+#ifdef DEBUG_SANITY_CHECK
+
+    Call_Verify_Addr_HEAPSBX(Builders, M_, Address, MaxIndex);
+#else
+    if (M_ == nullptr)
+        M_ = Builders->GetInsertBlock()->getParent()->getParent();
+
+    BasicBlock *CurrentBB = CurBB;
+    IRBuilder<> Builder(CurrentBB);
+    Builder.SetInsertPoint(TargetInstr->getNextNode());
+
+    // Vector to store newly added instructions
+    std::vector<Instruction *> NewInstructions;
+
+    GlobalVariable *lowerbound_1 = M_->getNamedGlobal("lowerbound_1");
+    GlobalVariable *upperbound_1 = M_->getNamedGlobal("upperbound_1");
+    GlobalVariable *lowerbound_2 = M_->getNamedGlobal("lowerbound_2");
+    GlobalVariable *upperbound_2 = M_->getNamedGlobal("upperbound_2");
+    if (!lowerbound_1 || !upperbound_1) {
+        llvm::errs() << "Error: Global variables not found!\n";
+        return;
+    }
+
+    // Load the global variables
+    Value *lowerboundVal_1 = Builder.CreateAlignedLoad(Type::getInt64Ty(M_->getContext()), lowerbound_1, llvm::Align(8));
+    Value *upperboundVal_1 = Builder.CreateAlignedLoad(Type::getInt64Ty(M_->getContext()), upperbound_1, llvm::Align(8));
+
+    NewInstructions.push_back(cast<Instruction>(lowerboundVal_1));
+    NewInstructions.push_back(cast<Instruction>(upperboundVal_1));
+
+    // Adjust Address with MaxIndex if necessary
+    Value *OffsetValWithHeap = Address;
+    NewInstructions.push_back(cast<Instruction>(OffsetValWithHeap));
+
+    Value *OffsetValWithHeapPlusMaxIndex = OffsetValWithHeap;
+
+    auto *ConstMaxIndex = dyn_cast<ConstantInt>(MaxIndex);
+    if (!ConstMaxIndex || !ConstMaxIndex->isMinusOne()) {
+        OffsetValWithHeapPlusMaxIndex = Builder.CreateAdd(OffsetValWithHeapPlusMaxIndex, MaxIndex, "IsoHeapRangePlusMaxIndex");
+        NewInstructions.push_back(cast<Instruction>(OffsetValWithHeapPlusMaxIndex));
+    }
+
+    // Generate the ICmp conditions
+    Value *LowerChk = Builder.CreateICmpUGE(OffsetValWithHeapPlusMaxIndex, lowerboundVal_1, "IsoHeap.LowerCheck");
+    Value *UpperChk = Builder.CreateICmpULE(OffsetValWithHeapPlusMaxIndex, upperboundVal_1, "IsoHeap.UpperCheck");
+
+    // Combine the checks using AND
+    Value *RangeCheck = Builder.CreateAnd(LowerChk, UpperChk, "IsoHeap.RangeCheck");
+
+    // Check if there's an existing taint check, and combine conditions
+    Instruction *Term = CurrentBB->getTerminator();
+    BasicBlock *ExistingSanityCheckBB = nullptr;
+    if (Term)
+    {
+        if (auto *Br = dyn_cast<BranchInst>(Term)) {
+            if (!Br->isConditional()) {
+                ExistingSanityCheckBB = Br->getSuccessor(0);
+                if (ExistingSanityCheckBB->getName().startswith("IsoHeap.RangeCheck")) {
+                    if (auto *SanityCheckBr = dyn_cast<BranchInst>(ExistingSanityCheckBB->getTerminator())) {
+                        Value *ExistingTaintCheck = SanityCheckBr->getCondition();
+                        IRBuilder<> SanityCheckBuilder(ExistingSanityCheckBB);
+                        SanityCheckBuilder.SetInsertPoint(ExistingSanityCheckBB->getTerminator());
+
+                        // Combine the conditions
+                        RangeCheck = SanityCheckBuilder.CreateAnd(ExistingTaintCheck, RangeCheck, "IsoHeap.RangeCheck");
+                        SanityCheckBr->setCondition(RangeCheck);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    // Assuming Builder, M_, and ConditionVal are already defined
+    createOrGetCheckAndTrap_HEAP_Function(Builder, M_, RangeCheck, OffsetValWithHeapPlusMaxIndex);
+    return;
+#endif
+}
+
+static void
+Call_Check_and_trap_HEAPSBX(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
 
 #ifdef DEBUG_SANITY_CHECK
 
-    VerifyIndexableAddress(Builder, M_, Address, MaxIndex);
+    Call_Verify_Addr_HEAPSBX(Builder, M_, Address, MaxIndex);
+#else
+    if (M_ == nullptr)
+        M_ = Builder->GetInsertBlock()->getParent()->getParent();
+
+    LLVMContext &Context = M_->getContext();
+
+    // Vector to store newly added instructions
+    std::vector<Instruction *> NewInstructions;
+
+    GlobalVariable *lowerbound_1 = M_->getNamedGlobal("lowerbound_1");
+    GlobalVariable *upperbound_1 = M_->getNamedGlobal("upperbound_1");
+    BasicBlock *CurrentBB = Builder->GetInsertBlock();
+
+    if (!lowerbound_1 || !upperbound_1) {
+        llvm::errs() << "Error: Global variables not found!\n";
+        return;
+    }
+
+    // Load the global variables
+    Value *lowerboundVal_1 = Builder->CreateAlignedLoad(Type::getInt64Ty(Context), lowerbound_1, llvm::Align(8));
+    Value *upperboundVal_1 = Builder->CreateAlignedLoad(Type::getInt64Ty(Context), upperbound_1, llvm::Align(8));
+
+    NewInstructions.push_back(cast<Instruction>(lowerboundVal_1));
+    NewInstructions.push_back(cast<Instruction>(upperboundVal_1));
+
+    // Adjust Address with MaxIndex if necessary
+    Value *OffsetValWithHeap = Address;
+    NewInstructions.push_back(cast<Instruction>(OffsetValWithHeap));
+
+    Value *OffsetValWithHeapPlusMaxIndex = OffsetValWithHeap;
+
+    auto *ConstMaxIndex = dyn_cast<ConstantInt>(MaxIndex);
+    if (!ConstMaxIndex || !ConstMaxIndex->isMinusOne()) {
+        OffsetValWithHeapPlusMaxIndex = Builder->CreateAdd(OffsetValWithHeapPlusMaxIndex, MaxIndex, "IsoHeapRangePlusMaxIndex");
+        NewInstructions.push_back(cast<Instruction>(OffsetValWithHeapPlusMaxIndex));
+    }
+
+    // Generate the ICmp conditions
+    Value *LowerChk = Builder->CreateICmpUGE(OffsetValWithHeapPlusMaxIndex, lowerboundVal_1, "IsoHeap.LowerCheck");
+    Value *UpperChk = Builder->CreateICmpULE(OffsetValWithHeapPlusMaxIndex, upperboundVal_1, "IsoHeap.UpperCheck");
+
+    // Combine the checks using AND
+    Value *RangeCheck = Builder->CreateAnd(LowerChk, UpperChk, "IsoHeap.RangeCheck");
+
+    // Check if there's an existing taint check, and combine conditions
+    Instruction *Term = CurrentBB->getTerminator();
+    BasicBlock *ExistingSanityCheckBB = nullptr;
+    if (Term)
+    {
+        if (auto *Br = dyn_cast<BranchInst>(Term)) {
+            if (!Br->isConditional()) {
+                ExistingSanityCheckBB = Br->getSuccessor(0);
+                if (ExistingSanityCheckBB->getName().startswith("IsoHeap.RangeCheck")) {
+                    if (auto *SanityCheckBr = dyn_cast<BranchInst>(ExistingSanityCheckBB->getTerminator())) {
+                        Value *ExistingTaintCheck = SanityCheckBr->getCondition();
+                        IRBuilder<> SanityCheckBuilder(ExistingSanityCheckBB);
+                        SanityCheckBuilder.SetInsertPoint(ExistingSanityCheckBB->getTerminator());
+
+                        // Combine the conditions
+                        RangeCheck = SanityCheckBuilder.CreateAnd(ExistingTaintCheck, RangeCheck, "IsoHeap.RangeCheck");
+                        SanityCheckBr->setCondition(RangeCheck);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    // Call the check and trap function with the final condition
+    createOrGetCheckAndTrap_HEAP_Function(*Builder, M_, RangeCheck,OffsetValWithHeapPlusMaxIndex);
+
+#endif
+}
+
+static void
+Call_Check_and_trap_WASMSBX(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
+
+#ifdef DEBUG_SANITY_CHECK
+
+    Call_Verify_Addr_WASMSBX(Builder, M_, Address, MaxIndex);
 #else
     if (M_ == nullptr)
         M_ = Builder->GetInsertBlock()->getParent()->getParent();
@@ -648,9 +991,44 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, Value *Address, Va
         }
     }
 
-    Builder->CreateCall(M_->getFunction("check_and_trap"), {ConditionVal});
+    createOrGetCheckAndTrap_WASM_Function(*Builder, M_, ConditionVal);
     return;
 #endif
+}
+
+static void EmitHeap_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
+    LLVMContext &Context = M_->getContext();
+
+    // Retrieve the 'iso_heap_check_and_trap' function from the module, or create it if it doesn't exist
+    Function *CheckAndTrapFn = M_->getFunction("iso_heap_check_and_trap");
+    if (!CheckAndTrapFn) {
+        createCheckAndTrapFunctionHeapSBX(*M_);
+        CheckAndTrapFn = M_->getFunction("iso_heap_check_and_trap");
+    }
+
+    // Ensure the function is found
+    if (!CheckAndTrapFn) {
+        llvm::errs() << "Error: Unable to find or create 'iso_heap_check_and_trap' function.\n";
+        return;
+    }
+
+    // Cast Address to an i64 type
+    Value *PtrAsInt = Builder->CreatePtrToInt(Address, Type::getInt64Ty(Context));
+
+    // Check if MaxIndex is the constant -1
+    if (llvm::ConstantInt *ConstMaxIndex = llvm::dyn_cast<llvm::ConstantInt>(MaxIndex)) {
+        if (ConstMaxIndex->isMinusOne()) {
+            // If MaxIndex is -1, pass Address as-is
+            Builder->CreateCall(CheckAndTrapFn, {PtrAsInt});
+            return;
+        }
+    }
+
+    // If MaxIndex is not -1, add MaxIndex to Address
+    Value *AdjustedAddress = Builder->CreateAdd(PtrAsInt, MaxIndex);
+
+    // Pass the adjusted address to the function
+    Builder->CreateCall(CheckAndTrapFn, {AdjustedAddress});
 }
 
 CallInst *IRBuilderBase::CreateFAddReduce(Value *Acc, Value *Src) {
@@ -768,22 +1146,40 @@ CallInst *IRBuilderBase::FetchSbxHeapBound(Module* M){
     return fetchSbxHeapBound(this, M);
 }
 
-CallInst *IRBuilderBase::VerifyIndexableAddressFunc(Module* M, Value *Address, Value *MaxIndex){
+CallInst *IRBuilderBase::Verify_Wasm_ptr_with_optimization(Module* M, Value *Address, Value *MaxIndex){
   //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
-  return VerifyIndexableAddress(this, M, Address, MaxIndex);
+  return Call_Verify_Addr_WASMSBX(this, M, Address, MaxIndex);
+}
+
+CallInst *IRBuilderBase::Verify_heap_ptr_with_optimization(Module* M, Value *Address, Value *MaxIndex){
+    //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
+    return Call_Verify_Addr_HEAPSBX(this, M, Address, MaxIndex);
 }
 
 void
-IRBuilderBase::Verify_Wasm_ptr(Module* M, Value *Address, Value *MaxIndex) {
+IRBuilderBase::Verify_Wasm_ptr_no_optimization(Module* M, Value *Address, Value *MaxIndex) {
     // Emit the sanity check and get the tuple result (Value* and vector<BasicBlock*>)
-    return EmitWASM_SBX_sanity_check(this, M, Address, MaxIndex);
+    return Call_Check_and_trap_WASMSBX(this, M, Address, MaxIndex);
+}
+
+void
+IRBuilderBase::Verify_heap_ptr_no_optimization(Module* M, Value *Address, Value *MaxIndex) {
+    // Emit the sanity check and get the tuple result (Value* and vector<BasicBlock*>)
+    return Call_Check_and_trap_HEAPSBX(this, M, Address, MaxIndex);
 }
 
 void
 IRBuilderBase::Verify_Wasm_ptr_within_loop(Module* M, llvm::BasicBlock* CurBB,
                                            Value *Address, Value *MaxIndex, Instruction *TargetInstr) {
     // Emit the sanity check within the loop and get the tuple result (Value* and vector<BasicBlock*>)
-    return EmitWASM_SBX_sanity_check_within_loop(this, M, CurBB, Address, MaxIndex, TargetInstr);
+    return Call_Check_and_trap_WASMSBX_within_loop(this, M, CurBB, Address, MaxIndex, TargetInstr);
+}
+
+void
+IRBuilderBase::Verify_heap_ptr_within_loop(Module* M, llvm::BasicBlock* CurBB,
+                                           Value *Address, Value *MaxIndex, Instruction *TargetInstr) {
+    // Emit the sanity check within the loop and get the tuple result (Value* and vector<BasicBlock*>)
+    return Call_Check_and_trap_HEAPSBX_within_loop(this, M, CurBB, Address, MaxIndex, TargetInstr);
 }
 
 Value *IRBuilderBase::AddWasm_condition(Module* M, Value *Address){

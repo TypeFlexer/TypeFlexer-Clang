@@ -2750,15 +2750,23 @@ public:
   CallInst *registerCallbackFunction(Value *Src);
     CallInst *unregisterCallbackFunction(Value *Src);
 
-    CallInst *VerifyIndexableAddressFunc(llvm::Module *M, Value*, Value*);
+    CallInst *Verify_Wasm_ptr_with_optimization(llvm::Module *M, Value*, Value*);
 
     Value *AddWasm_condition(Module *M, Value *Address);
 
     void
-    Verify_Wasm_ptr(Module *M, Value *Address, Value *MaxIndex);
+    Verify_Wasm_ptr_no_optimization(Module *M, Value *Address, Value *MaxIndex);
 
     void
     Verify_Wasm_ptr_within_loop(Module *M, BasicBlock *CurBB, Value *Address, Value *MaxIndex, Instruction*);
+
+    void Verify_heap_ptr_no_optimization(Module *M, Value *Address, Value *MaxIndex);
+
+    void
+    Verify_heap_ptr_within_loop(Module *M, BasicBlock *CurBB, Value *Address, Value *MaxIndex,
+                                Instruction *TargetInstr);
+
+    CallInst *Verify_heap_ptr_with_optimization(Module *M, Value *Address, Value *MaxIndex);
 };
 
 /// This provides a uniform API for creating instructions and inserting

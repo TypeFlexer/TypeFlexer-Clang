@@ -4237,6 +4237,94 @@ Expr *CodeGenFunction::isInsideLoop(const Expr *E) {
   return isInsideLoop(cast<Stmt>(E));
 }
 
+void CodeGenFunction::HandleSandboxingCheck(CodeGenModule &CGM, clang::CodeGen::CGBuilderTy& Builder,
+                               llvm::Value *Addr, llvm::Value *Idx) {
+    // Assign the provided Idx to MaxIdx
+    llvm::Value *MaxIdx = Idx;
+
+    // Convert the pointer (Addr) to an i64 integer type
+    llvm::Value *Address = Builder.CreatePtrToInt(Addr, llvm::Type::getInt64Ty(CGM.getLLVMContext()));
+
+  if (CGM.getCodeGenOpts().wasmsbx)
+  {
+    // Get the current basic block
+    llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
+
+    // Check for duplicates of the same call in the current basic block
+    bool IsDuplicate = false;
+    for (llvm::Instruction &I : *CurrentBB) {
+      if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+        if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_verify_addr_wasmsbx") {
+          if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
+            IsDuplicate = true;
+            break;
+          }
+        }
+      }
+    }
+
+    // If no duplicate found, insert the call
+    if (!IsDuplicate) {
+      // Check the optimization level before calling the function
+      if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+        Builder.Verify_Wasm_ptr_no_optimization(&CGM.getModule(), Address, MaxIdx);
+      } else {
+        Builder.Verify_Wasm_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
+      }
+    }
+  }
+
+  if (CGM.getCodeGenOpts().heapsbx) {
+    // Get the current basic block
+    llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
+
+    // Check for duplicates of the same call in the current basic block
+    bool IsDuplicate = false;
+    for (llvm::Instruction &I : *CurrentBB) {
+      if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+        if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_verify_addr_heapsbx") {
+          if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
+            IsDuplicate = true;
+            break;
+          }
+        }
+      }
+    }
+
+    // If no duplicate found, insert the call
+    if (!IsDuplicate) {
+      // Check the optimization level before calling the function
+      if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+        Builder.Verify_heap_ptr_no_optimization(&CGM.getModule(), Address, MaxIdx);
+      } else {
+        Builder.Verify_heap_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
+      }
+    }
+  }
+
+  return;
+}
+
+bool isDuplicateCall(llvm::BasicBlock *CurrentBB, llvm::Value *Address, llvm::Value *MaxIdx) {
+  // Loop through all the instructions in the given basic block
+  for (llvm::Instruction &I : *CurrentBB) {
+    // Check if the instruction is a call instruction
+    if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+      // Get the called function
+      if (llvm::Function *Callee = Call->getCalledFunction()) {
+        // Check if the called function's name is either "c_verify_addr_wasmsbx" or "c_verify_addr_heapsbx"
+        if (Callee->getName() == "c_verify_addr_wasmsbx" || Callee->getName() == "c_verify_addr_heapsbx") {
+          // Compare the arguments
+          if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
+            return true; // Duplicate found
+          }
+        }
+      }
+    }
+  }
+  return false; // No duplicate found
+}
+
 LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
                                                bool Accessed) {
   bool shouldCheckSanity = true;
@@ -4306,46 +4394,9 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     }
 
     if (LoopExpr) {
-      // Create a constant value of -1 (as a placeholder for MaxIdx)
-      llvm::Value *MaxIdx = Idx;
-
-      // Convert the pointer (Addr) to an i64 integer type
-      llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
-
-      // Check if the Address is an instruction to find the current basic block
-      if (llvm::Instruction *AddressInst = llvm::dyn_cast<llvm::Instruction>(Address)) {
-        // Get the basic block it belongs to
-        llvm::BasicBlock *CurrentBB = AddressInst->getParent();
-
-        // Check if there's a duplicate of the call in the current basic block
-        bool IsDuplicate = false;
-        for (llvm::Instruction &I : *CurrentBB) {
-          // Check if the instruction is a call instruction
-          if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-            // Check if the called function matches
-            if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
-              // Check if the operands match
-              if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
-                IsDuplicate = true;
-                break;
-              }
-            }
-          }
-        }
-
-        // Only insert the call if it's not a duplicate
-        if (!IsDuplicate) {
-          // Check the optimization level before calling the function
-          if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
-            Builder.Verify_Wasm_ptr(&CGM.getModule(), Address, MaxIdx);
-          }
-          else
-            Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
-        }
-      }
+      // Call the encapsulated function with required arguments
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), Idx);
     }
-
-
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
     LValue LV = LValue::MakeVectorElt(Addr, Idx, E->getBase()->getType(),
@@ -4399,26 +4450,16 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
 
       // Check if there's a duplicate of the call in the current basic block
-      bool IsDuplicate = false;
-      for (llvm::Instruction &I : *CurrentBB) {
-        if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-          if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
-            if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
-              IsDuplicate = true;
-              break;
-            }
-          }
-        }
-      }
+      bool IsDuplicate = isDuplicateCall(CurrentBB, Address, MaxIdx);
 
       // Only insert the call if it's not a duplicate
       if (!IsDuplicate) {
         // Check the optimization level before calling the function
         if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
-          Builder.Verify_Wasm_ptr(&CGM.getModule(), Address, MaxIdx);
+          Builder.Verify_Wasm_ptr_no_optimization(&CGM.getModule(), Address, MaxIdx);
         }
         else
-          Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+          Builder.Verify_Wasm_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
       }
     }
 
@@ -4467,26 +4508,11 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
 
       // Check if there's a duplicate of the call in the current basic block
-      bool IsDuplicate = false;
-      for (llvm::Instruction &I : *CurrentBB) {
-        if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-          if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
-            if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
-              IsDuplicate = true;
-              break;
-            }
-          }
-        }
-      }
+      bool IsDuplicate = isDuplicateCall(CurrentBB, Address, MaxIdx);
 
       // Only insert the call if it's not a duplicate
       if (!IsDuplicate) {
-        // Check the optimization level before calling the function
-        if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
-          Builder.Verify_Wasm_ptr(&CGM.getModule(), Address, MaxIdx);
-        }
-        else
-          Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+        HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), Idx);
       }
     }
 
@@ -4545,25 +4571,11 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
 
       // Check for duplicates of the same call in the current basic block
       bool IsDuplicate = false;
-      for (llvm::Instruction &I : *CurrentBB) {
-        if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-          if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
-            if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
-              IsDuplicate = true;
-              break;
-            }
-          }
-        }
-      }
+      IsDuplicate = isDuplicateCall(CurrentBB, Address, MaxIdx);
 
       // If no duplicate found, insert the call
       if (!IsDuplicate) {
-        // Check the optimization level before calling the function
-        if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
-          Builder.Verify_Wasm_ptr(&CGM.getModule(), Address, MaxIdx);
-        }
-        else
-          Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+        HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
       }
     }
 
@@ -4631,26 +4643,11 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
 
       // Check for duplicates of the same call in the current basic block
-      bool IsDuplicate = false;
-      for (llvm::Instruction &I : *CurrentBB) {
-        if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-          if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
-            if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
-              IsDuplicate = true;
-              break;
-            }
-          }
-        }
-      }
+      bool IsDuplicate = isDuplicateCall(CurrentBB, Address, MaxIdx);
 
       // If no duplicate found, insert the call
       if (!IsDuplicate) {
-        // Check the optimization level before calling the function
-        if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
-          Builder.Verify_Wasm_ptr(&CGM.getModule(), Address, MaxIdx);
-        }
-        else
-          Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+        HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
       }
     }
 

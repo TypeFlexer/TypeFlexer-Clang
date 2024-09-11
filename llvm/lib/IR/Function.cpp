@@ -1337,7 +1337,7 @@ Function* Intrinsic::fetchSbxHeapAddress(Module *M){
                                                Int64Ty).getCallee());
 }
 
-Function* Intrinsic::VerifyIndexableAddress(Module *M) {
+Function* Intrinsic::Call_Verify_Addr_WASMSBX(Module *M) {
   // Get the i1 (boolean) type and the 64-bit integer type
   Type* VoidTy = Type::getVoidTy(M->getContext());
   Type* Int64Ty = Type::getInt64Ty(M->getContext());
@@ -1346,9 +1346,20 @@ Function* Intrinsic::VerifyIndexableAddress(Module *M) {
   FunctionType *FuncTy = FunctionType::get(VoidTy, {Int64Ty, Int64Ty}, false);
 
   // Insert or get the function in the module
-  return cast<Function>(M->getOrInsertFunction("c_licm_verify_addr", FuncTy).getCallee());
+  return cast<Function>(M->getOrInsertFunction("c_verify_addr_wasmsbx", FuncTy).getCallee());
 }
 
+Function* Intrinsic::Call_Verify_Addr_HEAPSBX(Module *M) {
+    // Get the i1 (boolean) type and the 64-bit integer type
+    Type* VoidTy = Type::getVoidTy(M->getContext());
+    Type* Int64Ty = Type::getInt64Ty(M->getContext());
+
+    // Define the function to take two int64_t arguments and return an i1
+    FunctionType *FuncTy = FunctionType::get(VoidTy, {Int64Ty, Int64Ty}, false);
+
+    // Insert or get the function in the module
+    return cast<Function>(M->getOrInsertFunction("c_verify_addr_heapsbx", FuncTy).getCallee());
+}
 
 
 Function* Intrinsic::fetchSbxHeapBound(Module *M){

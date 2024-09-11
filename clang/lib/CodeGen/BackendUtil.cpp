@@ -913,6 +913,84 @@ bool EmitAssemblyHelper::AddEmitPasses(legacy::PassManager &CodeGenPasses,
   return true;
 }
 
+
+static void InstrumentTaintedPointerVerification(Module *TheModule, const std::string &FuncNameToMatch) {
+  std::vector<Instruction *> InstructionsToErase;  // To collect instructions to be erased later
+
+  // Loop through each function in the module
+  for (Function &F : *TheModule) {
+    // Loop through each basic block in the function
+    for (BasicBlock &BB : F) {
+      // Loop through each instruction in the basic block
+      for (Instruction &I : BB) {
+        // Check if the instruction is a call instruction
+        if (auto *Call = dyn_cast<CallInst>(&I)) {
+          if (Function *Callee = Call->getCalledFunction()) {
+            // Check if the called function's name matches the one we are looking for
+            if (Callee->getName() == FuncNameToMatch) {
+              // Get the call instruction arguments
+              CallInst *callInt = Call;
+              Value *Arg0 = callInt->getArgOperand(0);  // First argument (pointer or address)
+              Value *Arg1 = callInt->getArgOperand(1);  // Second argument (index or bounds check)
+
+              // Get the parent basic block of the call instruction
+              BasicBlock *CurBB = callInt->getParent();
+
+              // Insert a verification function call (instrumentation)
+              llvm::IRBuilder<> Builder(CurBB->getTerminator());
+              if (FuncNameToMatch == "c_verify_addr_wasmsbx")
+                Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB, Arg0, Arg1, callInt);
+              else
+                Builder.Verify_heap_ptr_within_loop(CurBB->getModule(), CurBB, Arg0, Arg1, callInt);
+              // Replace the call with undef and mark the instruction for removal
+              Call->replaceAllUsesWith(UndefValue::get(Call->getType()));
+              InstructionsToErase.push_back(Call);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Erase the marked instructions after instrumentation
+  for (Instruction *I : InstructionsToErase) {
+    I->eraseFromParent();
+  }
+
+  InstructionsToErase.clear();
+}
+
+void markFunctionForInlining(Function &F, bool shouldInline) {
+  if (shouldInline) {
+    // Mark the function as always inline
+    F.addFnAttr(llvm::Attribute::AlwaysInline);
+  } else {
+    // Optionally remove the alwaysinline attribute if present
+    F.removeFnAttr(llvm::Attribute::AlwaysInline);
+    // Add noinline attribute to ensure this function is not inlined
+    F.addFnAttr(llvm::Attribute::NoInline);
+  }
+}
+
+void inlineSpecificFunctions(Module *TheModule, const std::vector<std::string> &FunctionsToInline) {
+  // Iterate over all the functions in the module
+  for (Function &F : *TheModule) {
+    // Check if the function name is in the list of functions to inline
+    bool shouldInline = (std::find(FunctionsToInline.begin(), FunctionsToInline.end(), F.getName().str()) != FunctionsToInline.end());
+    markFunctionForInlining(F, shouldInline);
+  }
+
+  // Create the pass manager for inlining
+  legacy::PassManager InliningPassManager;
+
+  // Add the inlining pass
+  InliningPassManager.add(llvm::createFunctionInliningPass(3, 2, false));  // OptLevel = 3, SizeOptLevel = 2
+
+  // Run the inlining pass on the module
+  InliningPassManager.run(*TheModule);
+}
+
+
 void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
                                       std::unique_ptr<raw_pwrite_stream> OS) {
   TimeRegion Region(CodeGenOpts.TimePasses ? &CodeGenerationTime : nullptr);
@@ -1019,53 +1097,20 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     PerModulePasses.run(*TheModule);
   }
 
-  // Add instrumentation to the module before invoking the inlining pass
-  std::vector<Instruction *> InstructionsToErase;  // To collect instructions to be erased later
+  if (CodeGenOpts.heapsbx || CodeGenOpts.wasmsbx || CodeGenOpts.noopsbx)
+  {
+    // List of functions that should be inlined
+    std::vector<std::string> FunctionsToInline = {"c_verify_addr_wasmsbx", "c_verify_addr_heapsbx"};
 
-  for (Function &F : *TheModule) {
-    for (BasicBlock &BB : F) {
-      for (Instruction &I : BB) {
-        // Check if the instruction is a call instruction
-        if (auto *Call = dyn_cast<CallInst>(&I)) {
-          if (Function *Callee = Call->getCalledFunction()) {
-            // Check if the called function's name is "c_licm_verify_addr"
-            if (Callee->getName() == "c_licm_verify_addr") {
-              // Get the call instruction arguments
-              CallInst *callInt = Call;
-              Value *Arg0 = callInt->getArgOperand(0);  // First argument (%1)
-              Value *Arg1 = callInt->getArgOperand(1);  // Second argument (%idxprom)
+    // Call the inlining function with the module and the list of functions to inline
+    inlineSpecificFunctions(TheModule, FunctionsToInline);
 
-              // Get the parent basic block of the call instruction
-              BasicBlock *CurBB = callInt->getParent();
+    InstrumentTaintedPointerVerification(TheModule, "c_verify_addr_wasmsbx");
+    InstrumentTaintedPointerVerification(TheModule, "c_verify_addr_heapsbx");
 
-              // Insert a verification function call (instrumentation)
-              llvm::IRBuilder<> Builder(CurBB->getTerminator());
-              Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB, Arg0, Arg1, callInt);
 
-              // Replace the call with undef and mark the instruction for removal
-              Call->replaceAllUsesWith(UndefValue::get(Call->getType()));
-              InstructionsToErase.push_back(Call);
-            }
-          }
-        }
-      }
-    }
+    inlineSpecificFunctions(TheModule, FunctionsToInline);
   }
-
-// Erase the marked instructions after instrumentation
-  for (Instruction *I : InstructionsToErase) {
-    I->eraseFromParent();
-  }
-
-  InstructionsToErase.clear();
-
-  legacy::PassManager InliningPassManager;
-
-  // Add the inlining pass with the desired parameters
-  InliningPassManager.add(llvm::createFunctionInliningPass(3, 2, false));  // OptLevel = 3, SizeOptLevel = 2
-
-  // Run the inlining pass on the module
-  InliningPassManager.run(*TheModule);
 
   {
     PrettyStackTraceString CrashInfo("Code generation");
