@@ -2750,18 +2750,16 @@ public:
   CallInst *registerCallbackFunction(Value *Src);
     CallInst *unregisterCallbackFunction(Value *Src);
 
-    CallInst *Verify_Wasm_ptr_with_optimization(llvm::Module *M, Value*, Value*);
+    CallInst *VerifyIndexableAddressFunc(llvm::Module *M, Value*, Value*);
 
     Value *AddWasm_condition(Module *M, Value *Address);
 
     void
-    Verify_Wasm_ptr_no_optimization(Module *M, Value *Address, Value *MaxIndex);
+    Verify_Wasm_ptr(Module *M, Value *Address, Value *MaxIndex);
 
     void
     Verify_Wasm_ptr_within_loop(Module *M, BasicBlock *CurBB, Value *Address, Value *MaxIndex, Instruction*);
-
     void Verify_heap_ptr_no_optimization(Module *M, Value *Address, Value *MaxIndex);
-
     void
     Verify_heap_ptr_within_loop(Module *M, BasicBlock *CurBB, Value *Address, Value *MaxIndex,
                                 Instruction *TargetInstr);
@@ -2769,6 +2767,18 @@ public:
     CallInst *Verify_heap_ptr_with_optimization(Module *M, Value *Address, Value *MaxIndex);
 
     Value *AddHeap_condition(Module *M, Value *Address);
+    void createCheckAndTrapFunctionHeapSBX(Module &M);
+    void createCheckAndTrapFunctionHeapSBX_withIndex(Module &M);
+    void createOrGetCheckAndTrap_HEAP_Function(IRBuilderBase &Builder, Module *M_, Value *ConditionVal, Value* AddrArg);
+    void createOrGetCheckAndTrap_HEAP_Function_with_index(IRBuilderBase &Builder, Module *M_,
+                                                                         Value* AddrArg, Value* IndexArg);
+    void Call_Check_and_trap_HEAPSBX_within_loop(IRBuilderBase *Builders, Module *M_, llvm::BasicBlock *CurBB, Value *Address,
+                                                                Value *MaxIndex, Instruction *TargetInstr);
+    void Call_Check_and_trap_HEAPSBX(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex);
+
+    CallInst *VerifyIndexableAddressFunc_Heap(Module *M, Value *Address, Value *MaxIndex);
+
+    Value *addHeap_condition(IRBuilderBase *Builder, Module *M_, Value *Address);
 };
 
 /// This provides a uniform API for creating instructions and inserting

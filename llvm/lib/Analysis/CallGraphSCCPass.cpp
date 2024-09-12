@@ -313,19 +313,6 @@ bool CGPassManager::RefreshCallGraph(const CallGraphSCC &CurSCC, CallGraph &CG,
         if (Callee && Callee->isIntrinsic())
           continue;
 
-//        if (Call && Call->hasName() && Call->getName().str() == "CacheUpdateandCheck_2")
-//        {
-//          //special handling for typeflexer.
-//          Calls.erase(Call);
-//          continue;
-//        }
-//
-//        if (Call && !Call->hasName())
-//        {
-//          Calls.erase(Call);
-//          continue;
-//        }
-
         // If we are not in checking mode, insert potential callback calls as
         // references. This is not a requirement but helps to iterate over the
         // functions in the right order.
@@ -382,7 +369,7 @@ bool CGPassManager::RefreshCallGraph(const CallGraphSCC &CurSCC, CallGraph &CG,
           MadeChange = true;
           continue;
         }
-//
+
 //        assert(!CheckingMode &&
 //               "CallGraphSCCPass did not update the CallGraph correctly!");
 

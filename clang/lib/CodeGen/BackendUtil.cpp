@@ -913,7 +913,6 @@ bool EmitAssemblyHelper::AddEmitPasses(legacy::PassManager &CodeGenPasses,
   return true;
 }
 
-
 static void InstrumentTaintedPointerVerification(Module *TheModule, const std::string &FuncNameToMatch) {
   std::vector<Instruction *> InstructionsToErase;  // To collect instructions to be erased later
 
@@ -938,7 +937,7 @@ static void InstrumentTaintedPointerVerification(Module *TheModule, const std::s
 
               // Insert a verification function call (instrumentation)
               llvm::IRBuilder<> Builder(CurBB->getTerminator());
-              if (FuncNameToMatch == "c_verify_addr_wasmsbx")
+              if (FuncNameToMatch == "c_licm_verify_addr")
                 Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB, Arg0, Arg1, callInt);
               else
                 Builder.Verify_heap_ptr_within_loop(CurBB->getModule(), CurBB, Arg0, Arg1, callInt);
@@ -971,25 +970,6 @@ void markFunctionForInlining(Function &F, bool shouldInline) {
     F.addFnAttr(llvm::Attribute::NoInline);
   }
 }
-
-void inlineSpecificFunctions(Module *TheModule, const std::vector<std::string> &FunctionsToInline) {
-  // Iterate over all the functions in the module
-  for (Function &F : *TheModule) {
-    // Check if the function name is in the list of functions to inline
-    bool shouldInline = (std::find(FunctionsToInline.begin(), FunctionsToInline.end(), F.getName().str()) != FunctionsToInline.end());
-    markFunctionForInlining(F, shouldInline);
-  }
-
-  // Create the pass manager for inlining
-  legacy::PassManager InliningPassManager;
-
-  // Add the inlining pass
-  InliningPassManager.add(llvm::createFunctionInliningPass(3, 2, false));  // OptLevel = 3, SizeOptLevel = 2
-
-  // Run the inlining pass on the module
-  InliningPassManager.run(*TheModule);
-}
-
 
 void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
                                       std::unique_ptr<raw_pwrite_stream> OS) {
@@ -1099,11 +1079,8 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
 
   if (CodeGenOpts.heapsbx || CodeGenOpts.wasmsbx || CodeGenOpts.noopsbx)
   {
-    // List of functions that should be inlined
-    std::vector<std::string> FunctionsToInline = {"c_verify_addr_wasmsbx", "c_verify_addr_heapsbx"};
 
-
-    InstrumentTaintedPointerVerification(TheModule, "c_verify_addr_wasmsbx");
+    InstrumentTaintedPointerVerification(TheModule, "c_licm_verify_addr");
     InstrumentTaintedPointerVerification(TheModule, "c_verify_addr_heapsbx");
 
     legacy::PassManager InliningPassManager;
@@ -1113,6 +1090,7 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
 
     // Run the inlining pass on the module
     InliningPassManager.run(*TheModule);
+
   }
 
   {

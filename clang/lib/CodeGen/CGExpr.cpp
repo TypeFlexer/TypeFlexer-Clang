@@ -4238,12 +4238,12 @@ Expr *CodeGenFunction::isInsideLoop(const Expr *E) {
 }
 
 void CodeGenFunction::HandleSandboxingCheck(CodeGenModule &CGM, clang::CodeGen::CGBuilderTy& Builder,
-                               llvm::Value *Addr, llvm::Value *Idx) {
-    // Assign the provided Idx to MaxIdx
-    llvm::Value *MaxIdx = Idx;
+                                            llvm::Value *Addr, llvm::Value *Idx) {
+  // Assign the provided Idx to MaxIdx
+  llvm::Value *MaxIdx = Idx;
 
-    // Convert the pointer (Addr) to an i64 integer type
-    llvm::Value *Address = Builder.CreatePtrToInt(Addr, llvm::Type::getInt64Ty(CGM.getLLVMContext()));
+  // Convert the pointer (Addr) to an i64 integer type
+  llvm::Value *Address = Builder.CreatePtrToInt(Addr, llvm::Type::getInt64Ty(CGM.getLLVMContext()));
 
   if (CGM.getCodeGenOpts().wasmsbx)
   {
@@ -4267,9 +4267,9 @@ void CodeGenFunction::HandleSandboxingCheck(CodeGenModule &CGM, clang::CodeGen::
     if (!IsDuplicate) {
       // Check the optimization level before calling the function
       if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
-        Builder.Verify_Wasm_ptr_no_optimization(&CGM.getModule(), Address, MaxIdx);
+        Builder.Verify_Wasm_ptr(&CGM.getModule(), Address, MaxIdx);
       } else {
-        Builder.Verify_Wasm_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
+        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
       }
     }
   }
@@ -4297,7 +4297,7 @@ void CodeGenFunction::HandleSandboxingCheck(CodeGenModule &CGM, clang::CodeGen::
       if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
         Builder.Verify_heap_ptr_no_optimization(&CGM.getModule(), Address, MaxIdx);
       } else {
-        Builder.Verify_heap_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
+        Builder.VerifyIndexableAddressFunc_Heap(&CGM.getModule(), Address, MaxIdx);
       }
     }
   }
@@ -4313,7 +4313,7 @@ bool isDuplicateCall(llvm::BasicBlock *CurrentBB, llvm::Value *Address, llvm::Va
       // Get the called function
       if (llvm::Function *Callee = Call->getCalledFunction()) {
         // Check if the called function's name is either "c_verify_addr_wasmsbx" or "c_verify_addr_heapsbx"
-        if (Callee->getName() == "c_verify_addr_wasmsbx" || Callee->getName() == "c_verify_addr_heapsbx") {
+        if (Callee->getName() == "c_licm_verify_addr" || Callee->getName() == "c_verify_addr_heapsbx") {
           // Compare the arguments
           if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
             return true; // Duplicate found
@@ -4394,8 +4394,12 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     }
 
     if (LoopExpr) {
-      // Call the encapsulated function with required arguments
-      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), Idx);
+      // Create a constant value of -1 (as a placeholder for MaxIdx)
+      llvm::Value *MaxIdx = Idx;
+
+      // Convert the pointer (Addr) to an i64 integer type
+      llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
     }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
@@ -4446,16 +4450,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       // Convert the pointer (Addr) to an i64 integer type
       llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), Int64Ty);
 
-      // Get the current basic block
-      llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
-
-      // Check if there's a duplicate of the call in the current basic block
-      bool IsDuplicate = isDuplicateCall(CurrentBB, Address, MaxIdx);
-
-      // Only insert the call if it's not a duplicate
-      if (!IsDuplicate) {
-        HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
-      }
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
     }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
@@ -4499,16 +4494,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       // Convert the pointer (Addr) to an i64 integer type
       llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
 
-      // Get the current basic block
-      llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
-
-      // Check if there's a duplicate of the call in the current basic block
-      bool IsDuplicate = isDuplicateCall(CurrentBB, Address, MaxIdx);
-
-      // Only insert the call if it's not a duplicate
-      if (!IsDuplicate) {
-        HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), Idx);
-      }
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
     }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
@@ -4560,18 +4546,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
 
       // Convert the pointer (Addr) to an i64 integer type
       llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
-
-      // Get the current basic block
-      llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
-
-      // Check for duplicates of the same call in the current basic block
-      bool IsDuplicate = false;
-      IsDuplicate = isDuplicateCall(CurrentBB, Address, MaxIdx);
-
-      // If no duplicate found, insert the call
-      if (!IsDuplicate) {
-        HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
-      }
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
     }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
@@ -4634,16 +4609,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       // Convert the pointer (Addr) to an i64 integer type
       llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
 
-      // Get the current basic block
-      llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
-
-      // Check for duplicates of the same call in the current basic block
-      bool IsDuplicate = isDuplicateCall(CurrentBB, Address, MaxIdx);
-
-      // If no duplicate found, insert the call
-      if (!IsDuplicate) {
-        HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
-      }
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
     }
 
     // do tainted pointer crap only if not in loops, else let the CGLoop module handle it
