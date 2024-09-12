@@ -51,6 +51,9 @@ Function *SandboxRegisterCallbackFunction(Module *M);
 Function *SandboxUNRegisterCallbackFunction(Module *M);
 Function* Call_Verify_Addr_HEAPSBX(Module *pModule);
 
+    Function *SandboxTaintedMemCheckFunction_2(Module *M);
+    Function *VerifyIndexableAddress(Module *M);
+    Function *VerifyIndexableAddress_Heap(Module *M);
 } // end namespace Intrinsic
 
 class GlobalValue : public Constant {

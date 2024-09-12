@@ -44,77 +44,6 @@ namespace {
 //
 // Expression-specific dynamic check insertion
 //
-BasicBlock *CodeGenFunction::EmitTaintedL2_CacheMissBlock(BasicBlock * CacheHit, Value* PointerAsInt64) {
-    // Save current insert point
-    BasicBlock *Begin = Builder.GetInsertBlock();
-
-    // Add a "failed block", which will be inserted at the end of CurFn
-    BasicBlock *FailBlock = createBasicBlock("IsoHeap_L2", CurFn);
-    Builder.SetInsertPoint(FailBlock);
-    Builder.CreateIsTaintedPtr(PointerAsInt64, "_Tainted_Cache_L1L2.Cache_update_and_check");
-    //jump back to the cache hit block
-    Builder.CreateBr(CacheHit);
-
-    // Return the insert point back to the saved insert point
-    Builder.SetInsertPoint(Begin);
-
-    return FailBlock;
-}
-
-BasicBlock *CodeGenFunction::EmitTaintedL1_CacheMissBlock(BasicBlock * CacheHit, Value* PointerAsInt64) {
-    ++NumDynamicChecksInserted;
-    // Save current insert point
-    BasicBlock *Begin = Builder.GetInsertBlock();
-
-    // Add a "failed block", which will be inserted at the end of CurFn
-    BasicBlock *FailBlock = createBasicBlock("IsoHeap_L1.MISS", CurFn);
-    Builder.SetInsertPoint(FailBlock);
-    BasicBlock *DyCkSuccess = createBasicBlock("_Tainted_Cache_L2.HIT");
-    BasicBlock *DyCkFail = EmitTaintedL2_CacheMissBlock(DyCkSuccess, PointerAsInt64);
-
-    GlobalVariable *lowerbound_2 = CGM.getModule().getNamedGlobal("lowerbound_2");
-    GlobalVariable *upperbound_2 =  CGM.getModule().getNamedGlobal("upperbound_2");
-    Value *lowerboundVal_2 = Builder.CreateAlignedLoad(
-            llvm::Type::getInt64Ty(PointerAsInt64->getContext()),
-            lowerbound_2, 8, false);
-    Value *upperboundVal_2 = Builder.CreateAlignedLoad(
-            llvm::Type::getInt64Ty(PointerAsInt64->getContext()),
-            upperbound_2, 8, false);
-    auto UpperChk_2 = Builder.CreateICmpULE(PointerAsInt64, upperboundVal_2,
-                                            "IsoHeap.Cache_upper");
-    auto LowerChk_2= Builder.CreateICmpUGE(PointerAsInt64, lowerboundVal_2,
-                                           "IsoHeap.Cache_lower");
-    llvm::Value *Condition_2 =
-            Builder.CreateAnd(LowerChk_2, UpperChk_2, "IsoHeap._2_RangeCheck");
-    Builder.CreateCondBr(Condition_2, DyCkSuccess, DyCkFail);
-    // This ensures the success block comes directly after the branch
-    EmitBlock(DyCkSuccess);
-    Builder.SetInsertPoint(DyCkSuccess);
-
-
-    //jump back to the cache hit block
-    Builder.CreateBr(CacheHit);
-
-    // Return the insert point back to the saved insert point
-    Builder.SetInsertPoint(Begin);
-
-    return FailBlock;
-}
-
-void CodeGenFunction::EmitDynamicTaintedCacheCheckBlocks(Value *Condition, Value *PointerAsInt64) {
-    assert(Condition->getType()->isIntegerTy(1) &&
-           "May only dynamic check boolean conditions");
-    ++NumDynamicChecksInserted;
-
-    BasicBlock *DyCkSuccess = createBasicBlock("IsoHeap_HIT");
-    BasicBlock *DyCkFail = EmitTaintedL1_CacheMissBlock(DyCkSuccess, PointerAsInt64);
-
-    Builder.CreateCondBr(Condition, DyCkSuccess, DyCkFail);
-    // This ensures the success block comes directly after the branch
-    EmitBlock(DyCkSuccess);
-    Builder.SetInsertPoint(DyCkSuccess);
-}
-
 
 void CodeGenFunction::EmitExplicitDynamicCheck(const Expr *Condition) {
   if (!getLangOpts().CheckedC)
@@ -182,7 +111,6 @@ bool CodeGenFunction::shouldEmitTaintedPtrDerefAdaptor(const CodeGenModule &CGM,
 
 void CodeGenFunction::EmitDynamicNonNullCheck(const Address BaseAddr,
                                               const QualType BaseTy) {
-    return;
   if (!shouldEmitNonNullCheck(CGM, BaseTy))
     return;
 
@@ -434,7 +362,6 @@ void
 CodeGenFunction::EmitDynamicBoundsCastCheck(const Address BaseAddr,
                                             const BoundsExpr *CastBounds,
                                             const BoundsExpr *SubExprBounds) {
-    return;
   if (!getLangOpts().CheckedC)
     return;
 
@@ -642,6 +569,20 @@ void CodeGenFunction::EmitDynamicCheckBlocks(Value *Condition) {
   Builder.SetInsertPoint(DyCkSuccess);
 }
 
+void CodeGenFunction::EmitDynamicTaintedCacheCheckBlocks(Value *Condition, Value *PointerAsInt64) {
+  assert(Condition->getType()->isIntegerTy(1) &&
+         "May only dynamic check boolean conditions");
+  ++NumDynamicChecksInserted;
+
+  BasicBlock *DyCkSuccess = createBasicBlock("IsoHeap_HIT");
+  BasicBlock *DyCkFail = EmitTaintedL1_CacheMissBlock(DyCkSuccess, PointerAsInt64);
+
+  Builder.CreateCondBr(Condition, DyCkSuccess, DyCkFail);
+  // This ensures the success block comes directly after the branch
+  EmitBlock(DyCkSuccess);
+  Builder.SetInsertPoint(DyCkSuccess);
+}
+
 Value*
 CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool shouldCheckSanity) {
 
@@ -719,7 +660,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
          bool IsDuplicate = false;
          for (llvm::Instruction &I : *CurrentBB) {
              if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-                 if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_verify_addr_wasmsbx") {
+                 if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
                      if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
                          IsDuplicate = true;
                          break;
@@ -739,7 +680,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
                         ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
                     }
                     else
-                        Builder.Verify_Wasm_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
+                        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
                 }
             else {
                 // Check the optimization level before calling the function
@@ -747,7 +688,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
                     ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
                 }
                 else
-                    Builder.Verify_Wasm_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
+                    Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
             }
          }
 
@@ -813,28 +754,28 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
             if (!IsDuplicate) {
                 if (auto *ConstInt = dyn_cast<ConstantInt>(MaxIdx))
                     if (ConstInt->isMinusOne())
-                        ConditionVal = nullptr;//Builder.AddHeap_condition(&CGM.getModule(), Address);
+                        ConditionVal = Builder.AddHeap_condition(&CGM.getModule(), Address);
                     else {
                         // Check the optimization level before calling the function
                         if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
-                            Builder.Verify_heap_ptr_no_optimization(&CGM.getModule(), Address, MaxIdx);
+                            Builder.AddHeap_condition(&CGM.getModule(), Address);
                         }
                         else
-                            Builder.Verify_heap_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
+                            Builder.VerifyIndexableAddressFunc_Heap(&CGM.getModule(), Address, MaxIdx);
                     }
                 else {
                     // Check the optimization level before calling the function
                     if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
-                        Builder.Verify_heap_ptr_no_optimization(&CGM.getModule(), Address, MaxIdx);
+                        Builder.AddHeap_condition(&CGM.getModule(), Address);
                     }
                     else
-                        Builder.Verify_heap_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
+                        Builder.VerifyIndexableAddressFunc_Heap(&CGM.getModule(), Address, MaxIdx);
                 }
             }
         }
 
-//        if (ConditionVal)
-//            EmitDynamicTaintedCacheCheckBlocks(ConditionVal, PointerAsInt64);
+        if (ConditionVal)
+            EmitDynamicTaintedCacheCheckBlocks(ConditionVal, PointerAsInt64);
 
         return BaseAddr.getPointer();
     }
@@ -863,6 +804,63 @@ BasicBlock *CodeGenFunction::EmitDynamicCheckFailedBlock() {
   TrapCall->setDoesNotReturn();
   TrapCall->setDoesNotThrow();
   Builder.CreateUnreachable();
+
+  // Return the insert point back to the saved insert point
+  Builder.SetInsertPoint(Begin);
+
+  return FailBlock;
+}
+
+BasicBlock *CodeGenFunction::EmitTaintedL1_CacheMissBlock(BasicBlock * CacheHit, Value* PointerAsInt64) {
+    ++NumDynamicChecksInserted;
+    // Save current insert point
+  BasicBlock *Begin = Builder.GetInsertBlock();
+
+  // Add a "failed block", which will be inserted at the end of CurFn
+  BasicBlock *FailBlock = createBasicBlock("IsoHeap_L1.MISS", CurFn);
+  Builder.SetInsertPoint(FailBlock);
+  BasicBlock *DyCkSuccess = createBasicBlock("_Tainted_Cache_L2.HIT");
+  BasicBlock *DyCkFail = EmitTaintedL2_CacheMissBlock(DyCkSuccess, PointerAsInt64);
+
+  GlobalVariable *lowerbound_2 = CGM.getModule().getNamedGlobal("lowerbound_2");
+  GlobalVariable *upperbound_2 =  CGM.getModule().getNamedGlobal("upperbound_2");
+  Value *lowerboundVal_2 = Builder.CreateAlignedLoad(
+      llvm::Type::getInt64Ty(PointerAsInt64->getContext()),
+      lowerbound_2, 8, false);
+  Value *upperboundVal_2 = Builder.CreateAlignedLoad(
+      llvm::Type::getInt64Ty(PointerAsInt64->getContext()),
+      upperbound_2, 8, false);
+  auto UpperChk_2 = Builder.CreateICmpULE(PointerAsInt64, upperboundVal_2,
+                                          "IsoHeap.Cache_upper");
+  auto LowerChk_2= Builder.CreateICmpUGE(PointerAsInt64, lowerboundVal_2,
+                                          "IsoHeap.Cache_lower");
+  llvm::Value *Condition_2 =
+      Builder.CreateAnd(LowerChk_2, UpperChk_2, "IsoHeap.cache_range_2");
+  Builder.CreateCondBr(Condition_2, DyCkSuccess, DyCkFail);
+  // This ensures the success block comes directly after the branch
+  EmitBlock(DyCkSuccess);
+  Builder.SetInsertPoint(DyCkSuccess);
+
+
+  //jump back to the cache hit block
+  Builder.CreateBr(CacheHit);
+
+  // Return the insert point back to the saved insert point
+  Builder.SetInsertPoint(Begin);
+
+  return FailBlock;
+}
+
+BasicBlock *CodeGenFunction::EmitTaintedL2_CacheMissBlock(BasicBlock * CacheHit, Value* PointerAsInt64) {
+  // Save current insert point
+  BasicBlock *Begin = Builder.GetInsertBlock();
+
+  // Add a "failed block", which will be inserted at the end of CurFn
+  BasicBlock *FailBlock = createBasicBlock("IsoHeap_L2", CurFn);
+  Builder.SetInsertPoint(FailBlock);
+  Builder.CreateIsTaintedPtr(PointerAsInt64, "_Tainted_Cache_L1L2.Cache_update_and_check");
+  //jump back to the cache hit block
+  Builder.CreateBr(CacheHit);
 
   // Return the insert point back to the saved insert point
   Builder.SetInsertPoint(Begin);

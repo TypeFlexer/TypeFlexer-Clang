@@ -4789,7 +4789,7 @@ private:
 
     bool isPointerReassignedInLoop(const ValueDecl *PointerDecl, const Stmt *LoopStmt);
 
-    void HandleSandboxingCheck(CodeGenModule &CGM, clang::CodeGen::CGBuilderTy& Builder, llvm::Value *Addr, llvm::Value *Idx);
+    void HandleSandboxingCheck(CodeGenModule &CGM, CGBuilderTy &Builder, llvm::Value *Addr, llvm::Value *Idx);
 };
 
 /// TargetFeatures - This class is used to check whether the builtin function
