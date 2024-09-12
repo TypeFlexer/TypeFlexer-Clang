@@ -1102,14 +1102,17 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
     // List of functions that should be inlined
     std::vector<std::string> FunctionsToInline = {"c_verify_addr_wasmsbx", "c_verify_addr_heapsbx"};
 
-    // Call the inlining function with the module and the list of functions to inline
-    inlineSpecificFunctions(TheModule, FunctionsToInline);
 
     InstrumentTaintedPointerVerification(TheModule, "c_verify_addr_wasmsbx");
     InstrumentTaintedPointerVerification(TheModule, "c_verify_addr_heapsbx");
 
+    legacy::PassManager InliningPassManager;
 
-    inlineSpecificFunctions(TheModule, FunctionsToInline);
+    // Add the inlining pass with the desired parameters
+    InliningPassManager.add(llvm::createFunctionInliningPass(3, 2, false));  // OptLevel = 3, SizeOptLevel = 2
+
+    // Run the inlining pass on the module
+    InliningPassManager.run(*TheModule);
   }
 
   {

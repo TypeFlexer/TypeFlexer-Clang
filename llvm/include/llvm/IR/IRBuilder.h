@@ -2767,6 +2767,8 @@ public:
                                 Instruction *TargetInstr);
 
     CallInst *Verify_heap_ptr_with_optimization(Module *M, Value *Address, Value *MaxIndex);
+
+    Value *AddHeap_condition(Module *M, Value *Address);
 };
 
 /// This provides a uniform API for creating instructions and inserting

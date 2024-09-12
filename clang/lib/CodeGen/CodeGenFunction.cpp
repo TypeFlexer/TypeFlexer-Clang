@@ -1352,6 +1352,9 @@ void CodeGenFunction::GenerateCode(GlobalDecl GD, llvm::Function *Fn,
   const FunctionDecl *FD = cast<FunctionDecl>(GD.getDecl());
   CurGD = GD;
 
+  if (FD && FD->getName().str() == "json_object_addn")
+    int a = 10;
+
   FunctionArgList Args;
   QualType ResTy = BuildFunctionArgList(GD, Args);
 

@@ -4454,12 +4454,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
 
       // Only insert the call if it's not a duplicate
       if (!IsDuplicate) {
-        // Check the optimization level before calling the function
-        if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
-          Builder.Verify_Wasm_ptr_no_optimization(&CGM.getModule(), Address, MaxIdx);
-        }
-        else
-          Builder.Verify_Wasm_ptr_with_optimization(&CGM.getModule(), Address, MaxIdx);
+        HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
       }
     }
 

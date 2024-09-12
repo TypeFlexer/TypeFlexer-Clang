@@ -1266,6 +1266,21 @@ Function* Intrinsic::SandboxTaintedMemCheckFunction(Module *M){
       .getCallee());
 }
 
+Function* Intrinsic::SandboxTaintedMemCheckFunction_2(Module *M){
+  LLVMContext &Context = M->getContext();
+
+  // Define the types for the function parameters
+  Type* VoidPtrType = Type::getInt8PtrTy(Context); // i8*
+  Type* Int64Type = Type::getInt64Ty(Context);     // i64
+  Type* RetType = Type::getInt1Ty(Context);        // Return type i1
+
+  // Define the function signature (i1 (i8*, i64))
+  FunctionType *FnType = FunctionType::get(RetType, {VoidPtrType, Int64Type}, false);
+
+  // Insert or retrieve the function declaration
+  return cast<Function>(M->getOrInsertFunction("CacheUpdateandCheck_2", FnType).getCallee());
+}
+
 Function* Intrinsic::SandboxRegisterTaintedFunction(Module *M){
   Type* VOIDPtr= const_cast<PointerType*>(Type::getInt8PtrTy(M->getContext()));
   Type* RetTyp = (Type::getInt1Ty(M->getContext()));
