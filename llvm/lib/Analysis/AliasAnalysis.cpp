@@ -208,7 +208,7 @@ ModRefInfo AAResults::getModRefInfo(const CallBase *Call,
     Result = intersectModRef(Result, AA->getModRefInfo(Call, Loc, AAQI));
 
     // Early-exit the moment we reach the bottom of the lattice.
-    if (isNoModRef(Result) || (!Call->hasName()))
+    if (isNoModRef(Result))
       return ModRefInfo::NoModRef;
   }
 
