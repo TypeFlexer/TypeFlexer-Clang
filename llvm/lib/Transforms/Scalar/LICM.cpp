@@ -709,16 +709,16 @@ llvm::Instruction* FindLoopBoundInstruction(llvm::Instruction *Inst, llvm::Loop 
             return nullptr;
         }
 
-        // Check if the terminator is a conditional branch
+        // Check if the terminator is a branch instruction
         if (llvm::BranchInst *Branch = llvm::dyn_cast<llvm::BranchInst>(Terminator)) {
             if (Branch->isConditional()) {
                 llvm::Value *Condition = Branch->getCondition();
 
                 // Check if the condition is an `icmp` instruction
                 if (llvm::ICmpInst *ICmp = llvm::dyn_cast<llvm::ICmpInst>(Condition)) {
-                    // Check if the name of the condition starts with "SandMem.TaintCheck"
-                    if (ICmp->getName().startswith("SandMem.TaintCheck")
-                    || ICmp->getName().startswith("IsoHeap.RangeCheck")) {
+                    // Check if the name of the condition starts with "SandMem.TaintCheck" or "IsoHeap.RangeCheck"
+                    if (ICmp->getName().startswith("SandMem.TaintCheck") ||
+                        ICmp->getName().startswith("IsoHeap.")) {
                         LLVM_DEBUG(llvm::dbgs() << "Found SandMem.TaintCheck condition, continuing to the first label.\n");
 
                         // Set the latch block to the first successor (first label) of the branch
@@ -731,7 +731,7 @@ llvm::Instruction* FindLoopBoundInstruction(llvm::Instruction *Inst, llvm::Loop 
                             return nullptr; // We will handle decrementing loops later
                         }
 
-                        // If we found the correct latch (doesn't start with "SandMem.TaintCheck"), process the condition
+                        // Process the ICmp instruction to determine the loop bound
                         llvm::Value *Op0 = ICmp->getOperand(0);
                         llvm::Value *Op1 = ICmp->getOperand(1);
 
@@ -743,88 +743,103 @@ llvm::Instruction* FindLoopBoundInstruction(llvm::Instruction *Inst, llvm::Loop 
                             LLVM_DEBUG(llvm::dbgs() << "Found loop bound: " << *Op0 << " (Op0 is not PHI)\n");
                             return llvm::dyn_cast<llvm::Instruction>(Op0);  // Return Op0 if Op1 is PHI
                         } else {
+                            // Try to traverse operands up to a PHI node
                             llvm::Value *PhiOp0 = TraverseUpToPHINode(Op0, LatchBlock);
                             llvm::Value *PhiOp1 = TraverseUpToPHINode(Op1, LatchBlock);
 
                             if (PhiOp0 && llvm::isa<llvm::PHINode>(PhiOp0)) {
                                 LLVM_DEBUG(llvm::dbgs() << "Found loop bound: " << *Op1 << " (Op1 is not PHI)\n");
-                                return llvm::dyn_cast<llvm::Instruction>(Op1);  // Return Op1 if Op0 is PHI
+                                return llvm::dyn_cast<llvm::Instruction>(Op1);
                             } else if (PhiOp1 && llvm::isa<llvm::PHINode>(PhiOp1)) {
                                 LLVM_DEBUG(llvm::dbgs() << "Found loop bound: " << *Op0 << " (Op0 is not PHI)\n");
-                                return llvm::dyn_cast<llvm::Instruction>(Op0);  // Return Op0 if Op1 is PHI
+                                return llvm::dyn_cast<llvm::Instruction>(Op0);
                             }
                             LLVM_DEBUG(llvm::dbgs() << "No PHI node found in operands, cannot determine loop bound.\n");
                             return nullptr;
                         }
                     }
                 }
-            } else {
-                // Check if Inst is a PHI node
-                if (llvm::PHINode *PhiNode = llvm::dyn_cast<llvm::PHINode>(Inst)) {
-                    LLVM_DEBUG(llvm::dbgs() << "Instruction is a PHI node. Analyzing its uses...\n");
+                else if (llvm::BinaryOperator *BinOp = llvm::dyn_cast<llvm::BinaryOperator>(Condition)) {
+                    if (BinOp->getOpcode() == llvm::Instruction::And) {
+                        LLVM_DEBUG(llvm::dbgs() << "Condition is an 'and' instruction.\n");
 
-                    // Use the function to find the dominating ICmp instruction using the PHI node
-                    llvm::Instruction *DominatingICmp = FindDominatingICmpUsingPHI(PhiNode, CallInst, DT);
+                        // Check if operands start with "IsoHeap."
+                        llvm::Value *Op0 = BinOp->getOperand(0);
+                        llvm::Value *Op1 = BinOp->getOperand(1);
 
-                    if (DominatingICmp) {
-                        llvm::ICmpInst *ICmp = llvm::dyn_cast<llvm::ICmpInst>(DominatingICmp);
-                        if (!ICmp) {
-                            LLVM_DEBUG(llvm::dbgs() << "No dominating ICmp instruction found.\n");
-                            return nullptr;
-                        }
+                        bool Op0IsIsoHeap = Op0->hasName() && Op0->getName().startswith("IsoHeap.");
+                        bool Op1IsIsoHeap = Op1->hasName() && Op1->getName().startswith("IsoHeap.");
 
-                        LLVM_DEBUG(llvm::dbgs() << "Found ICmp instruction using the PHI node: " << *ICmp << "\n");
-
-                        if (ICmp->getName().startswith("SandMem.TaintCheck")
-                            || ICmp->getName().startswith("IsoHeap.RangeCheck")) {
-                            LLVM_DEBUG(
-                                    llvm::dbgs() << "Found SandMem.TaintCheck condition, continuing to the first label.\n");
+                        if (Op0IsIsoHeap && Op1IsIsoHeap) {
+                            LLVM_DEBUG(llvm::dbgs() << "Both operands start with 'IsoHeap.', moving to first successor.\n");
 
                             // Set the latch block to the first successor (first label) of the branch
                             LatchBlock = Branch->getSuccessor(0);
                             continue;  // Repeat the process with the new latch block
-                        } else {
-                            // Perform the loop bound analysis on this ICmp instruction
-                            llvm::Value *Op0 = ICmp->getOperand(0);
-                            llvm::Value *Op1 = ICmp->getOperand(1);
-
-                            // Determine which operand is the loop induction variable (the PHI node) and which is the loop bound
-                            if (llvm::isa<llvm::PHINode>(Op0)) {
-                                LLVM_DEBUG(llvm::dbgs() << "Found loop bound: " << *Op1 << " (Op1 is not PHI)\n");
-                                return llvm::dyn_cast<llvm::Instruction>(Op1);  // Return Op1 if Op0 is PHI
-                            } else if (llvm::isa<llvm::PHINode>(Op1)) {
-                                LLVM_DEBUG(llvm::dbgs() << "Found loop bound: " << *Op0 << " (Op0 is not PHI)\n");
-                                return llvm::dyn_cast<llvm::Instruction>(Op0);  // Return Op0 if Op1 is PHI
-                            } else {
-                                // If neither operand is a PHI node, try traversing up to a PHI node
-                                llvm::Value *PhiOp0 = TraverseUpToPHINode(Op0, ICmp->getParent());
-                                llvm::Value *PhiOp1 = TraverseUpToPHINode(Op1, ICmp->getParent());
-
-                                if (PhiOp0 && llvm::isa<llvm::PHINode>(PhiOp0)) {
-                                    LLVM_DEBUG(llvm::dbgs() << "Found loop bound: " << *Op1 << " (Op1 is not PHI)\n");
-                                    return llvm::dyn_cast<llvm::Instruction>(Op1);  // Return Op1 if Op0 is PHI
-                                } else if (PhiOp1 && llvm::isa<llvm::PHINode>(PhiOp1)) {
-                                    LLVM_DEBUG(llvm::dbgs() << "Found loop bound: " << *Op0 << " (Op0 is not PHI)\n");
-                                    return llvm::dyn_cast<llvm::Instruction>(Op0);  // Return Op0 if Op1 is PHI
-                                }
-                                LLVM_DEBUG(llvm::dbgs() << "No PHI node found in operands, cannot determine loop bound.\n");
-                                return nullptr;
-                            }
                         }
-                    } else {
-                        LLVM_DEBUG(llvm::dbgs()
-                                           << "No ICmp instruction found using the PHI node that dominates the call instruction.\n");
-                        return nullptr;
                     }
                 }
+                else if (llvm::FCmpInst *FCmp = llvm::dyn_cast<llvm::FCmpInst>(Condition)) {
+                    LLVM_DEBUG(llvm::dbgs() << "Condition is an FCmpInst.\n");
+
+                    llvm::Value *Op0 = FCmp->getOperand(0);
+                    llvm::Value *Op1 = FCmp->getOperand(1);
+
+                    // Try to traverse operands up to a PHI node
+                    llvm::Value *PhiOp0 = TraverseUpToPHINode(Op0, LatchBlock);
+                    llvm::Value *PhiOp1 = TraverseUpToPHINode(Op1, LatchBlock);
+
+                    // Check if either operand traces back to our PHI node (Inst)
+                    bool Op0MatchesInst = (PhiOp0 && PhiOp0 == Inst);
+                    bool Op1MatchesInst = (PhiOp1 && PhiOp1 == Inst);
+
+                    if (Op0MatchesInst) {
+                        LLVM_DEBUG(llvm::dbgs() << "Operand 0 matches the induction PHI node. Found loop bound: " << *Op1 << "\n");
+                        return llvm::dyn_cast<llvm::Instruction>(Op1);  // Return Op1 as loop bound
+                    } else if (Op1MatchesInst) {
+                        LLVM_DEBUG(llvm::dbgs() << "Operand 1 matches the induction PHI node. Found loop bound: " << *Op0 << "\n");
+                        return llvm::dyn_cast<llvm::Instruction>(Op0);  // Return Op0 as loop bound
+                    } else {
+                        LLVM_DEBUG(llvm::dbgs() << "Neither operand matches the induction PHI node. Moving to successor block.\n");
+
+                        // Move to the latch block's immediate successor and continue
+                        if (Branch->getNumSuccessors() > 0) {
+                            LatchBlock = Branch->getSuccessor(0);
+                            continue;
+                        } else {
+                            LLVM_DEBUG(llvm::dbgs() << "Branch has no successors, cannot proceed.\n");
+                            return nullptr;
+                        }
+                    }
+                }
+                else {
+                    // Additional conditions can be handled here if needed
+                    LLVM_DEBUG(llvm::dbgs() << "Condition is neither ICmpInst nor 'and' instruction, cannot determine loop bound.\n");
+                    return nullptr;
+                }
+            } else {
+                // Handle unconditional branches by moving to the successor block
+                if (Branch->getNumSuccessors() > 0) {
+                    LLVM_DEBUG(llvm::dbgs() << "Unconditional branch, moving to successor block.\n");
+                    // Move to the immediate successor of the branch
+                    LatchBlock = Branch->getSuccessor(0);
+                    continue;  // Repeat the process with the new latch block
+                } else {
+                    LLVM_DEBUG(llvm::dbgs() << "Branch has no successors, cannot proceed.\n");
+                    return nullptr;
+                }
             }
-            LLVM_DEBUG(llvm::dbgs() << "No loop bound found.\n");
-            return nullptr;  // Return nullptr if no loop-bound instruction is found
+        } else {
+            LLVM_DEBUG(llvm::dbgs() << "Terminator is not a branch instruction.\n");
+            return nullptr;
         }
+        LLVM_DEBUG(llvm::dbgs() << "No loop bound found.\n");
+        return nullptr;  // Return nullptr if no loop-bound instruction is found
     }
-    LLVM_DEBUG(llvm::dbgs() << "No loop bound found.\n");
-    return nullptr;  // Return nullptr if no loop-bound instruction is found
+    LLVM_DEBUG(llvm::dbgs() << "No loop bound found after traversing latch blocks.\n");
+    return nullptr;
 }
+
 
 bool CheckForCallInstInDependencies(
         llvm::Value *IndexExpr,
@@ -990,15 +1005,43 @@ llvm::Value* DuplicateInstructionsOutsideLoopWithMaxRanges(
             // Recursively process each operand and duplicate it if necessary
             for (llvm::Value *Operand : Operands) {
                 LLVM_DEBUG(llvm::dbgs() << "Processing operand: " << *Operand << "\n");
-                llvm::Value *NewOperand = DuplicateInstructionsOutsideLoopWithMaxRanges(Operand, L, Preheader, DT, MaxRanges, LVI, CurFn, SE);
+                llvm::Value *NewOperand = DuplicateInstructionsOutsideLoopWithMaxRanges(
+                        Operand, L, Preheader, DT, MaxRanges, LVI, CurFn, SE);
                 NewOperands.push_back(NewOperand);
             }
 
             // Create the new instruction using the duplicated operands
             llvm::Instruction *NewInst = Inst->clone();
             LLVM_DEBUG(llvm::dbgs() << "Cloning instruction: " << *NewInst << "\n");
-            for (unsigned i = 0; i < NewOperands.size(); ++i) {
-                NewInst->setOperand(i, NewOperands[i]);
+
+            // Check if the instruction is a LoadInst
+            if (llvm::LoadInst *LoadInst = llvm::dyn_cast<llvm::LoadInst>(NewInst)) {
+                // Get the duplicated operand
+                llvm::Value *NewOperand = NewOperands[0]; // LoadInst has only one operand
+
+                // If the duplicated operand is not a pointer type (e.g., another LoadInst)
+                if (!NewOperand->getType()->isPointerTy()) {
+                    LLVM_DEBUG(llvm::dbgs() << "Operand is not a pointer type.\n");
+
+                    // If the duplicated operand is a LoadInst, use its pointer operand
+                    if (llvm::LoadInst *NestedLoad = llvm::dyn_cast<llvm::LoadInst>(NewOperand)) {
+                        LLVM_DEBUG(llvm::dbgs() << "Operand is a LoadInst. Using its pointer operand.\n");
+                        NewOperand = NestedLoad->getPointerOperand();
+                    } else {
+                        // Handle other cases if necessary
+                        LLVM_DEBUG(llvm::dbgs() << "Operand is not a LoadInst. Cannot proceed.\n");
+                        // Optionally, you can assert or handle this case as needed
+                        // assert(false && "Expected a pointer type for LoadInst operand");
+                    }
+                }
+
+                // Set the operand for the new LoadInst
+                LoadInst->setOperand(0, NewOperand);
+            } else {
+                // For other instructions, set operands as usual
+                for (unsigned i = 0; i < NewOperands.size(); ++i) {
+                    NewInst->setOperand(i, NewOperands[i]);
+                }
             }
 
             // Insert the new instruction into the preheader
@@ -1006,7 +1049,8 @@ llvm::Value* DuplicateInstructionsOutsideLoopWithMaxRanges(
             Builder.Insert(NewInst);
 
             return NewInst;
-        } else {
+        }
+        else {
             LLVM_DEBUG(llvm::dbgs() << "Instruction dominates preheader or is already outside the loop.\n");
         }
     }
@@ -1284,8 +1328,21 @@ LoopInvariantCodeMotion::getMaxRangesUsingLVI(const std::vector<PHINode *> &PhiN
         }
 
         if (!Phi->getType()->isIntegerTy()) {
+            // Check if the PHINode has only one incoming edge
             LLVM_DEBUG(dbgs() << "PHINode " << *Phi
-                              << " is not of integer type, skipping.\n");
+                              << " is not of integer type but has only one incoming edge, attempting loop bound analysis.\n");
+            // Try to find the loop bound instruction
+            llvm::Instruction *LoopBoundInst = FindLoopBoundInstruction(static_cast<llvm::Instruction*>(Phi), L,
+                                                                        Preheader, DT, CallInst);
+            if (LoopBoundInst) {
+                MaxRanges[Phi] = LoopBoundInst;
+                LLVM_DEBUG(dbgs() << "Loop bound instruction found for PHINode "
+                                  << *Phi << ": "
+                                  << *LoopBoundInst << "\n");
+            } else {
+                LLVM_DEBUG(dbgs() << "Failed to find loop bound instruction for PHINode "
+                                  << *Phi << "\n");
+            }
             continue;
         }
 
