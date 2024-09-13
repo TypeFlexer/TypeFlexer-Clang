@@ -4790,6 +4790,8 @@ private:
     bool isPointerReassignedInLoop(const ValueDecl *PointerDecl, const Stmt *LoopStmt);
 
     void HandleSandboxingCheck(CodeGenModule &CGM, CGBuilderTy &Builder, llvm::Value *Addr, llvm::Value *Idx);
+
+    llvm::BasicBlock *EmitTaintedL3_CacheMissBlock(llvm::BasicBlock *CacheHit, llvm::Value *PointerAsInt64);
 };
 
 /// TargetFeatures - This class is used to check whether the builtin function

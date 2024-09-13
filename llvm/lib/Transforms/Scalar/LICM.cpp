@@ -1601,9 +1601,7 @@ bool LoopInvariantCodeMotion::runOnLoop(
         OptimalPreheader = getOutermostPreheader(L, DT);
     }
 
-
     Instruction *VerifyAddrCall = nullptr;
-
 
     if (Preheader && Preheader->getParent()->getName().str() == "bignum_init")
         return false;

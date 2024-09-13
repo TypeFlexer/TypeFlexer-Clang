@@ -2779,6 +2779,8 @@ public:
     CallInst *VerifyIndexableAddressFunc_Heap(Module *M, Value *Address, Value *MaxIndex);
 
     Value *addHeap_condition(IRBuilderBase *Builder, Module *M_, Value *Address);
+
+    CallInst *CreateTaintedPtrMemCheck(Module *M, Value *Src);
 };
 
 /// This provides a uniform API for creating instructions and inserting
