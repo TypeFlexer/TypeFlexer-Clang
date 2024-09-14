@@ -574,15 +574,17 @@ void CodeGenFunction::EmitDynamicTaintedCacheCheckBlocks(Value *Condition, Value
            "May only dynamic check boolean conditions");
     ++NumDynamicChecksInserted;
 
+    // Create the success and fail blocks
     BasicBlock *DyCkSuccess = createBasicBlock("IsoHeap_HIT");
     BasicBlock *DyCkFail = EmitTaintedL1_CacheMissBlock(DyCkSuccess, PointerAsInt64);
 
+    // Create a conditional branch based on the condition
     Builder.CreateCondBr(Condition, DyCkSuccess, DyCkFail);
-    // This ensures the success block comes directly after the branch
+
+    // Emit the success block
     EmitBlock(DyCkSuccess);
     Builder.SetInsertPoint(DyCkSuccess);
 }
-
 
 Value*
 CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool shouldCheckSanity) {
@@ -812,61 +814,43 @@ BasicBlock *CodeGenFunction::EmitDynamicCheckFailedBlock() {
   return FailBlock;
 }
 
-BasicBlock *CodeGenFunction::EmitTaintedL1_CacheMissBlock(BasicBlock * CacheHit, Value* PointerAsInt64) {
+
+BasicBlock *CodeGenFunction::EmitTaintedL1_CacheMissBlock(BasicBlock *CacheHit, Value *PointerAsInt64) {
     ++NumDynamicChecksInserted;
-    // Save current insert point
+    // Save the current insertion point
     BasicBlock *Begin = Builder.GetInsertBlock();
 
-    // Add a "failed block", which will be inserted at the end of CurFn
+    // Create the fail block
     BasicBlock *FailBlock = createBasicBlock("IsoHeap_L1.MISS", CurFn);
     Builder.SetInsertPoint(FailBlock);
-    BasicBlock *DyCkSuccess = createBasicBlock("_Tainted_Cache_L2.HIT");
-    BasicBlock *DyCkFail = EmitTaintedL2_CacheMissBlock(DyCkSuccess, PointerAsInt64);
 
-    GlobalVariable *lowerbound_2 = CGM.getModule().getNamedGlobal("lowerbound_2");
-    GlobalVariable *upperbound_2 =  CGM.getModule().getNamedGlobal("upperbound_2");
-    Value *lowerboundVal_2 = Builder.CreateAlignedLoad(
-            llvm::Type::getInt64Ty(PointerAsInt64->getContext()),
-            lowerbound_2, 8, false);
-    Value *upperboundVal_2 = Builder.CreateAlignedLoad(
-            llvm::Type::getInt64Ty(PointerAsInt64->getContext()),
-            upperbound_2, 8, false);
-    auto UpperChk_2 = Builder.CreateICmpULE(PointerAsInt64, upperboundVal_2,
-                                            "IsoHeap.Cache_upper");
-    auto LowerChk_2= Builder.CreateICmpUGE(PointerAsInt64, lowerboundVal_2,
-                                           "IsoHeap.Cache_lower");
-    llvm::Value *Condition_2 =
-            Builder.CreateAnd(LowerChk_2, UpperChk_2, "IsoHeap.cache_range_2");
-    Builder.CreateCondBr(Condition_2, DyCkSuccess, DyCkFail);
-    // This ensures the success block comes directly after the branch
-    EmitBlock(DyCkSuccess);
-    Builder.SetInsertPoint(DyCkSuccess);
+    // Call the verification function
+    Builder.CreateIsTaintedPtr(PointerAsInt64, "_Tainted_Cache_L1L2.Cache_update_and_check");
 
-
-    //jump back to the cache hit block
+    // After the call, branch back to the success block to continue execution
     Builder.CreateBr(CacheHit);
 
-    // Return the insert point back to the saved insert point
+    // Restore the original insertion point
     Builder.SetInsertPoint(Begin);
 
     return FailBlock;
 }
 
 BasicBlock *CodeGenFunction::EmitTaintedL2_CacheMissBlock(BasicBlock * CacheHit, Value* PointerAsInt64) {
-    // Save current insert point
-    BasicBlock *Begin = Builder.GetInsertBlock();
+  // Save current insert point
+  BasicBlock *Begin = Builder.GetInsertBlock();
 
-    // Add a "failed block", which will be inserted at the end of CurFn
-    BasicBlock *FailBlock = createBasicBlock("IsoHeap_L2", CurFn);
-    Builder.SetInsertPoint(FailBlock);
-    Builder.CreateIsTaintedPtr(PointerAsInt64, "_Tainted_Cache_L1L2.Cache_update_and_check");
-    //jump back to the cache hit block
-    Builder.CreateBr(CacheHit);
+  // Add a "failed block", which will be inserted at the end of CurFn
+  BasicBlock *FailBlock = createBasicBlock("IsoHeap_L2", CurFn);
+  Builder.SetInsertPoint(FailBlock);
+  Builder.CreateIsTaintedPtr(PointerAsInt64, "_Tainted_Cache_L1L2.Cache_update_and_check");
+  //jump back to the cache hit block
+  Builder.CreateBr(CacheHit);
 
-    // Return the insert point back to the saved insert point
-    Builder.SetInsertPoint(Begin);
+  // Return the insert point back to the saved insert point
+  Builder.SetInsertPoint(Begin);
 
-    return FailBlock;
+  return FailBlock;
 }
 
 BasicBlock *CodeGenFunction::EmitNulltermWriteAdditionalCheck(
