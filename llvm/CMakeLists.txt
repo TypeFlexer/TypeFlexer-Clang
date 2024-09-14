@@ -1002,6 +1002,9 @@ if( LLVM_INCLUDE_RUNTIMES )
   add_subdirectory(runtimes)
 endif()
 
+# Include the heap-sandbox-lib project
+add_subdirectory(heap-sandbox-lib/)
+
 if( LLVM_INCLUDE_EXAMPLES )
   add_subdirectory(examples)
 endif()

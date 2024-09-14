@@ -1,0 +1,70 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Debug-d16767c39cc928aae215.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.5"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "Project",
+					"targetIndexes" : 
+					[
+						0,
+						1
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "larson::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-larson-Debug-b97e1e50d937feee1511.json",
+					"name" : "larson",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "larson-hoard::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-larson-hoard-Debug-46afdcdc413fed39fec4.json",
+					"name" : "larson-hoard",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/supercharger/Flex-C/Hoard/benchmarks/larson/cmake-build-debug",
+		"source" : "/home/supercharger/Flex-C/Hoard/benchmarks/larson"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 4
+	}
+}

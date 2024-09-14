@@ -593,6 +593,8 @@ if(CLANG_LIBS)
       add_dependencies(install-clang-libraries-stripped install-${lib}-stripped)
     endif()
   endforeach()
+  # Add dependency on memprofile
+  add_dependencies(clang memprofile)
 endif()
 
 add_subdirectory(cmake/modules)
