@@ -595,6 +595,7 @@ if(CLANG_LIBS)
   endforeach()
   # Add dependency on memprofile
   add_dependencies(clang memprofile)
+  add_dependencies(clang checkcbox-headers)
 endif()
 
 add_subdirectory(cmake/modules)

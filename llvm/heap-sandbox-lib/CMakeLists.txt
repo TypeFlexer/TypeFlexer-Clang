@@ -39,9 +39,6 @@ target_include_directories(memprofile PUBLIC .)
 add_dependencies(profile build_hoard_shared)
 add_dependencies(memprofile build_hoard_shared)
 
-add_dependencies(profile build_hoard_static)
-add_dependencies(memprofile build_hoard_static)
-
 # Define the destination directory for libmemprofile.a
 set(MEMPROFILE_DESTINATION "${CMAKE_SOURCE_DIR}/../sandboxLib/HoardLib")
 

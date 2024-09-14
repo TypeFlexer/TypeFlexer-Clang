@@ -12,13 +12,6 @@ add_custom_target(
         COMMENT "Building hoard_shared using Makefile target Linux-gcc-x86_64"
 )
 
-add_custom_target(
-        build_hoard_static
-        COMMAND make Linux-gcc-x86_64-static
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/heap-sandbox-lib/Hoard/src
-        COMMENT "Building hoard_static using Makefile target Linux-gcc-x86_64-static"
-)
-
 # Create an aggregate target to build both hoard_shared and hoard_static
 add_custom_target(
         build_hoard ALL
@@ -32,9 +25,9 @@ set(HOARD_LIB_DESTINATION "${CMAKE_SOURCE_DIR}/../sandboxLib/HoardLib")
 file(MAKE_DIRECTORY ${HOARD_LIB_DESTINATION})
 
 # Add a post-build command to copy libhoard.a to HoardLib directory after build_hoard_static
-add_custom_command(TARGET build_hoard_static POST_BUILD
+add_custom_command(TARGET build_hoard_shared POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/libhoard.a"
-        "${HOARD_LIB_DESTINATION}/libhoard.a"
+        "${CMAKE_CURRENT_SOURCE_DIR}/libhoard.so"
+        "${HOARD_LIB_DESTINATION}/libhoard.so"
         COMMENT "Copying libhoard.a to sandboxLib directory"
 )
