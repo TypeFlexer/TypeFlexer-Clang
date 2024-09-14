@@ -4329,7 +4329,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
                                                bool Accessed) {
   bool shouldCheckSanity = true;
   Expr *LoopExpr = nullptr;
-  if (E->getBase()->getType()->isTaintedPointerType())
+  if (E->getBase()->getType()->isTaintedPointerType() && !CGM.getLangOpts().Noopsbx)
   {
       LoopExpr = isInsideLoop(E);
 

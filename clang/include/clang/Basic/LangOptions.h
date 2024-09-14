@@ -335,6 +335,10 @@ public:
   /// input is a header file (i.e. -x c-header).
   bool IsHeaderFile = false;
 
+  bool Wasmsbx = false; // Corresponds to -fwasmsbx
+  bool Noopsbx = false; // Corresponds to -fnoopsbx
+  bool Heapsbx = false; // Corresponds to -fheapsbx
+
   LangOptions();
 
   // Define accessors/mutators for language options of enumeration type.

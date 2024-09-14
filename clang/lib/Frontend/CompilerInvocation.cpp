@@ -2176,7 +2176,22 @@ void CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
                                        DiagnosticsEngine &Diags) {
   // FIXME: Cleanup per-file based stuff.
   LangStandard::Kind LangStd = LangStandard::lang_unspecified;
-  if (const Arg *A = Args.getLastArg(OPT_std_EQ)) {
+    if (const Arg* A = Args.getLastArg(OPT_fwasmsbx))
+    {
+      Opts.Wasmsbx = true;
+    }
+
+    if (const Arg* A = Args.getLastArg(OPT_fheapsbx))
+    {
+      Opts.Heapsbx = true;
+    }
+
+    if (const Arg* A = Args.getLastArg(OPT_fnoopsbx))
+    {
+      Opts.Noopsbx = true;
+    }
+
+      if (const Arg *A = Args.getLastArg(OPT_std_EQ)) {
     LangStd = LangStandard::getLangKind(A->getValue());
     if (LangStd == LangStandard::lang_unspecified) {
       Diags.Report(diag::err_drv_invalid_value)

@@ -413,7 +413,7 @@ void CodeGenFunction::EmitStaticVarDecl(const VarDecl &D,
   llvm::Constant *addr = CGM.getOrCreateStaticVarDecl(D, Linkage);
   CharUnits alignment = getContext().getDeclAlign(&D);
 
-  if (D.getType()->isTaintedPointerType())
+  if (!getLangOpts().Noopsbx && D.getType()->isTaintedPointerType())
     alignment = alignment.Four();
 
   // Store into LocalDeclMap before generating initializer to handle
@@ -442,7 +442,7 @@ void CodeGenFunction::EmitStaticVarDecl(const VarDecl &D,
   if (D.getInit() && !isCudaSharedVar)
     var = AddInitializerToStaticVarDecl(D, var);
 
-    if (D.getType()->isTaintedPointerType())
+    if (!getLangOpts().Noopsbx && D.getType()->isTaintedPointerType())
     {
       // check if -m32 flag is set
       if (getTarget().getTriple().getArch() == llvm::Triple::x86)
@@ -1164,7 +1164,7 @@ Address CodeGenModule::createUnnamedGlobalFrom(const VarDecl &D,
     llvm::GlobalVariable *GV = new llvm::GlobalVariable(
         getModule(), Ty, isConstant, llvm::GlobalValue::PrivateLinkage,
         Constant, Name, InsertBefore, llvm::GlobalValue::NotThreadLocal, AS);
-    if (D.getType()->isTaintedPointerType())
+    if (!getLangOpts().Noopsbx && D.getType()->isTaintedPointerType())
     {
       // check if -m32 flag is set
       if (getTarget().getTriple().getArch() == llvm::Triple::x86)
