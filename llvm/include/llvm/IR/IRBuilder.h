@@ -2769,9 +2769,14 @@ public:
     Value *AddHeap_condition(Module *M, Value *Address);
     void createCheckAndTrapFunctionHeapSBX(Module &M);
     void createCheckAndTrapFunctionHeapSBX_withIndex(Module &M);
+    void createCheckAndTrapFunctionWasmSBX_withIndex(Module &M);
+
     void createOrGetCheckAndTrap_HEAP_Function(IRBuilderBase &Builder, Module *M_, Value *ConditionVal, Value* AddrArg);
     void createOrGetCheckAndTrap_HEAP_Function_with_index(IRBuilderBase &Builder, Module *M_,
                                                                          Value* AddrArg, Value* IndexArg);
+    void createOrGetCheckAndTrap_WASM_Function_with_index(IRBuilderBase &Builder, Module *M_,
+                                                          Value* ConditionCheck);
+
     void Call_Check_and_trap_HEAPSBX_within_loop(IRBuilderBase *Builders, Module *M_, llvm::BasicBlock *CurBB, Value *Address,
                                                                 Value *MaxIndex, Instruction *TargetInstr);
     void Call_Check_and_trap_HEAPSBX(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex);

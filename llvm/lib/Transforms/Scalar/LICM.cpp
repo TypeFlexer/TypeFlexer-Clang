@@ -1625,83 +1625,81 @@ bool LoopInvariantCodeMotion::runOnLoop(
             Value *CallIndVar = CallIndVar = VerifyAddrCall->getOperand(1);
             std::vector<PHINode *> CallIndVarPhi = FindPhiNodesUpwards(CallIndVar);
 
-            if (CallIndVarPhi[0] && CallIndVarPhi[0] == LoopBoundPhiNode) {
-                // Get the first argument of the original call
-                SCEVExpander Expander(*SE, OptimalPreheader->getModule()->getDataLayout(), "loopbound");
-                IRBuilder<> Builder(OptimalPreheader->getTerminator());
+            // Get the first argument of the original call
+            SCEVExpander Expander(*SE, OptimalPreheader->getModule()->getDataLayout(), "loopbound");
+            IRBuilder<> Builder(OptimalPreheader->getTerminator());
 
 
-                // Assuming CallIndVarPhi is a single PHINode, wrap it into a vector
-                std::vector<PHINode *> PhiNodes = {CallIndVarPhi};
+            // Assuming CallIndVarPhi is a single PHINode, wrap it into a vector
+            std::vector<PHINode *> PhiNodes = {CallIndVarPhi};
 
-                // Call the getMaxRangesUsingLVI function
-                std::vector<PHINode *> CallIndVarPhis = FindPhiNodesUpwards(CallIndVar);
-                auto MaxRanges = getMaxRangesUsingLVI(PhiNodes, LVI, VerifyAddrCall,L, OptimalPreheader,
-                                                      DT, static_cast<CallInst *>(VerifyAddrCall));
+            // Call the getMaxRangesUsingLVI function
+            std::vector<PHINode *> CallIndVarPhis = FindPhiNodesUpwards(CallIndVar);
+            auto MaxRanges = getMaxRangesUsingLVI(PhiNodes, LVI, VerifyAddrCall,L, OptimalPreheader,
+                                                  DT, static_cast<CallInst *>(VerifyAddrCall));
 
-                if (MaxRanges.size() < CallIndVarPhis.size()) {
+            if (MaxRanges.size() < CallIndVarPhis.size()) {
 #ifndef DEBUG_SANITY_CHECK
-                    BeautifyAndPrintOptimizationDetails(CurFn, VerifyAddrCall, CallIndVarPhis, MaxRanges);
-                    CallInst *callInt = dyn_cast<CallInst>(VerifyAddrCall);
-                    Value *Arg0 = callInt->getArgOperand(0);
-                    Value *Arg1 = callInt->getArgOperand(1);
+                BeautifyAndPrintOptimizationDetails(CurFn, VerifyAddrCall, CallIndVarPhis, MaxRanges);
+                CallInst *callInt = dyn_cast<CallInst>(VerifyAddrCall);
+                Value *Arg0 = callInt->getArgOperand(0);
+                Value *Arg1 = callInt->getArgOperand(1);
 
 
-                    auto CurBB = VerifyAddrCall->getParent();
-                    if (sbx_type == 1)
-                        Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB,
-                                                            Arg0, Arg1, VerifyAddrCall);
-                    else if (sbx_type == 2)
-                        Builder.Verify_heap_ptr_within_loop(CurBB->getModule(), CurBB,
-                                                            Arg0, Arg1, VerifyAddrCall);
-                    // Remove the original VerifyAddrCall from the for.body block
-                    VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
-                    eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
-                    VerifyAddrCall = nullptr;
-#endif
-                    continue;
-                }
-
-                Value *Address = VerifyAddrCall->getOperand(0);
-
-                // Check if Address needs to be duplicated outside the loop
-                if (Instruction *AddrInst = dyn_cast<Instruction>(Address)) {
-                    if (L->contains(AddrInst)) {
-                        // Duplicate the address-related instructions outside the loop
-                        llvm::Value *DuplicatedAddress = DuplicateInstructionsOutsideLoop(Address, Builder, L,
-                                                                                          OptimalPreheader, DT);
-                        Address = DuplicatedAddress;
-                    }
-                }
-
-                llvm::Value *NewIndexExpr = CallIndVar;
-                if (CheckForCallInstInDependencies(
-                        CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE))
-                {
-                    NewIndexExpr = DuplicateInstructionsOutsideLoopWithMaxRanges(
-                            CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE);
-                }
-
-                // If LoopBound is of type i32, zero-extend it to i64
-                if (NewIndexExpr->getType()->isIntegerTy(32)) {
-                    NewIndexExpr = Builder.CreateSExt(NewIndexExpr, Builder.getInt64Ty(), "loopbound.zext");
-                }
-                Instruction *LastInstInPreheader = OptimalPreheader->getTerminator();
-
-
-                if (!isAvailableInBlock(OptimalPreheader, NewIndexExpr, DT))
-                    continue;
-
+                auto CurBB = VerifyAddrCall->getParent();
                 if (sbx_type == 1)
-                    Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(), Address, NewIndexExpr);
+                    Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB,
+                                                        Arg0, Arg1, VerifyAddrCall);
                 else if (sbx_type == 2)
-                    Builder.Verify_heap_ptr_no_optimization(OptimalPreheader->getModule(), Address, NewIndexExpr);
-
-                VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
+                    Builder.Verify_heap_ptr_within_loop(CurBB->getModule(), CurBB,
+                                                        Arg0, Arg1, VerifyAddrCall);
                 // Remove the original VerifyAddrCall from the for.body block
+                VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
                 eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
                 VerifyAddrCall = nullptr;
+#endif
+                continue;
             }
+
+            Value *Address = VerifyAddrCall->getOperand(0);
+
+            // Check if Address needs to be duplicated outside the loop
+            if (Instruction *AddrInst = dyn_cast<Instruction>(Address)) {
+                if (L->contains(AddrInst)) {
+                    // Duplicate the address-related instructions outside the loop
+                    llvm::Value *DuplicatedAddress = DuplicateInstructionsOutsideLoop(Address, Builder, L,
+                                                                                      OptimalPreheader, DT);
+                    Address = DuplicatedAddress;
+                }
+            }
+
+            llvm::Value *NewIndexExpr = CallIndVar;
+            if (CheckForCallInstInDependencies(
+                    CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE))
+            {
+                NewIndexExpr = DuplicateInstructionsOutsideLoopWithMaxRanges(
+                        CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE);
+            }
+
+            // If LoopBound is of type i32, zero-extend it to i64
+            if (NewIndexExpr->getType()->isIntegerTy(32)) {
+                NewIndexExpr = Builder.CreateSExt(NewIndexExpr, Builder.getInt64Ty(), "loopbound.zext");
+            }
+            Instruction *LastInstInPreheader = OptimalPreheader->getTerminator();
+
+
+            if (!isAvailableInBlock(OptimalPreheader, NewIndexExpr, DT))
+                continue;
+
+            if (sbx_type == 1)
+                Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(), Address, NewIndexExpr);
+            else if (sbx_type == 2)
+                Builder.Verify_heap_ptr_no_optimization(OptimalPreheader->getModule(), Address, NewIndexExpr);
+
+            VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
+            // Remove the original VerifyAddrCall from the for.body block
+            eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
+            VerifyAddrCall = nullptr;
         }
         else {
             Value *CallIndVar = nullptr;

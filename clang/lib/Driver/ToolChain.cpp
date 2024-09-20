@@ -1024,10 +1024,10 @@ void ToolChain::AddCXXStdlibLibArgs(const ArgList &Args,
 
 void ToolChain::AddWasmSBXLibArgs(const ArgList &Args, ArgStringList &CmdArgs) const {
   if (Args.hasArg(options::OPT_fwasmsbx)) {
-    CmdArgs.push_back("-ldl");
-    CmdArgs.push_back("-lstdc++");
-    CmdArgs.push_back("-lSBX_CON_LIB");
-    CmdArgs.push_back("-lisc_lib_final");
+//    CmdArgs.push_back("-ldl");
+//    CmdArgs.push_back("-lstdc++");
+//    CmdArgs.push_back("-lSBX_CON_LIB");
+//    CmdArgs.push_back("-lisc_lib_final");
   }
 }
 

@@ -581,7 +581,7 @@ EmitWASM_SBX_sanity_check_within_loop(IRBuilderBase *Builders, Module *M_, llvm:
         }
     }
 
-    Builder.CreateCall(M_->getFunction("sand_mem_check_and_trap"), {ConditionVal});
+    Builder.createOrGetCheckAndTrap_WASM_Function_with_index(Builder, M_, ConditionVal);
     return;
 #endif
 }
@@ -654,25 +654,28 @@ EmitWASM_SBX_sanity_check(IRBuilderBase *Builder, Module *M_, Value *Address, Va
     Value *ExistingTaintCheck = nullptr;
     BasicBlock *ExistingSanityCheckBB = nullptr;
 
-    if (auto *Br = dyn_cast<BranchInst>(Term)) {
-        if (!Br->isConditional()) {
-            ExistingSanityCheckBB = Br->getSuccessor(0);
-            if (ExistingSanityCheckBB->getName().startswith("sanityCheck")) {
-                if (auto *SanityCheckBr = dyn_cast<BranchInst>(ExistingSanityCheckBB->getTerminator())) {
-                    ExistingTaintCheck = SanityCheckBr->getCondition();
-                    IRBuilder<> SanityCheckBuilder(ExistingSanityCheckBB);
+    if (Term)
+    {
+        if (auto *Br = dyn_cast<BranchInst>(Term)) {
+            if (!Br->isConditional()) {
+                ExistingSanityCheckBB = Br->getSuccessor(0);
+                if (ExistingSanityCheckBB->getName().startswith("sanityCheck")) {
+                    if (auto *SanityCheckBr = dyn_cast<BranchInst>(ExistingSanityCheckBB->getTerminator())) {
+                        ExistingTaintCheck = SanityCheckBr->getCondition();
+                        IRBuilder<> SanityCheckBuilder(ExistingSanityCheckBB);
 
-                    SanityCheckBuilder.SetInsertPoint(ExistingSanityCheckBB->getTerminator());
+                        SanityCheckBuilder.SetInsertPoint(ExistingSanityCheckBB->getTerminator());
 
-                    Value *CombinedCondition = SanityCheckBuilder.CreateAnd(ExistingTaintCheck, ConditionVal, "CombinedTaintCheck");
-                    SanityCheckBr->setCondition(CombinedCondition);
-                    return;
+                        Value *CombinedCondition = SanityCheckBuilder.CreateAnd(ExistingTaintCheck, ConditionVal, "CombinedTaintCheck");
+                        SanityCheckBr->setCondition(CombinedCondition);
+                        return;
+                    }
                 }
             }
         }
     }
 
-    Builder->CreateCall(M_->getFunction("sand_mem_check_and_trap"), {ConditionVal});
+    Builder->createOrGetCheckAndTrap_WASM_Function_with_index(*Builder, M_, ConditionVal);
     return;
 #endif
 }
@@ -1695,6 +1698,80 @@ void IRBuilderBase::createCheckAndTrapFunctionHeapSBX_withIndex(Module &M) {
     // Fill in the end block
     Builder.SetInsertPoint(EndBB);
     Builder.CreateRetVoid();
+}
+
+void IRBuilderBase::createCheckAndTrapFunctionWasmSBX_withIndex(Module &M) {
+    LLVMContext &Context = M.getContext();
+    llvm::IRBuilder<> Builder(Context);
+
+    // Check if the 'sand_mem_check_and_trap' function already exists in the module
+    if (Function *ExistingFn = M.getFunction("sand_mem_check_and_trap")) {
+        return;
+    }
+
+    // Create the function signature for the 'sand_mem_check_and_trap' function
+    // Takes two int64 arguments: pointer address and an index
+    FunctionType *FnType = FunctionType::get(Type::getVoidTy(Context),
+                                             {Type::getInt1Ty(Context)}, // boolean check
+                                             false);
+
+    // Create the function with InternalLinkage to make it static
+    Function *CheckAndTrapFn = Function::Create(FnType, Function::InternalLinkage,
+                                                "sand_mem_check_and_trap", M);
+
+    // Mark the function as always inline
+    CheckAndTrapFn->addFnAttr(Attribute::AlwaysInline);
+
+    // Create the entry, trap, and end blocks
+    BasicBlock *EntryBB = BasicBlock::Create(Context, "entry", CheckAndTrapFn);
+    BasicBlock *TrapBB = BasicBlock::Create(Context, "trap", CheckAndTrapFn);
+    BasicBlock *EndBB = BasicBlock::Create(Context, "end", CheckAndTrapFn);
+
+    // Set up the builder and add instructions to the entry block
+    Builder.SetInsertPoint(EntryBB);
+
+    // Get the function arguments (int64 address, int64 index)
+    auto ArgIter = CheckAndTrapFn->arg_begin();
+    Argument *RangeCheck = &*ArgIter;
+
+    // Branch based on the range check condition (if address is non-zero, go to end, else trap)
+    Builder.CreateCondBr(RangeCheck, EndBB, TrapBB);
+
+    // Handle the trap block
+    Builder.SetInsertPoint(TrapBB);
+
+    // Insert trap condition (you can use llvm's intrinsic trap or custom logic)
+    // For demonstration purposes, I'll use llvm's intrinsic trap
+    Function *TrapIntrinsic = Intrinsic::getDeclaration(&M, Intrinsic::trap);
+    Builder.CreateCall(TrapIntrinsic);
+
+    // Follow the trap with an unreachable instruction
+    Builder.CreateUnreachable();
+
+    // Handle the end block
+    Builder.SetInsertPoint(EndBB);
+    Builder.CreateRetVoid();
+}
+
+void IRBuilderBase::createOrGetCheckAndTrap_WASM_Function_with_index(IRBuilderBase &Builder, Module *M_,
+                                                                     Value* ConditionCheck) {
+    // Retrieve the function 'iso_mem_check_and_trap' from the module
+    Function *CheckAndTrapFn = M_->getFunction("sand_mem_check_and_trap");
+
+    // If the function doesn't exist, create it using createCheckAndTrapFunction_WASM_SBX
+    if (!CheckAndTrapFn) {
+        createCheckAndTrapFunctionWasmSBX_withIndex(*M_);
+        CheckAndTrapFn = M_->getFunction("sand_mem_check_and_trap");
+
+        // Ensure that the function is created correctly
+        if (!CheckAndTrapFn) {
+            llvm::errs() << "Error: Unable to find or create 'sand_mem_check_and_trap' function.\n";
+            return;
+        }
+    }
+
+    // Create a call to the 'iso_mem_check_and_trap' function with the provided ConditionVal
+    Builder.CreateCall(CheckAndTrapFn, {ConditionCheck});
 }
 
 void IRBuilderBase::createOrGetCheckAndTrap_HEAP_Function_with_index(IRBuilderBase &Builder, Module *M_,

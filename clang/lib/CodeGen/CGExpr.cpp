@@ -4267,7 +4267,7 @@ void CodeGenFunction::HandleSandboxingCheck(CodeGenModule &CGM, clang::CodeGen::
     if (!IsDuplicate) {
       // Check the optimization level before calling the function
       if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
-        Builder.Verify_Wasm_ptr(&CGM.getModule(), Address, MaxIdx);
+        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
       } else {
         Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
       }
