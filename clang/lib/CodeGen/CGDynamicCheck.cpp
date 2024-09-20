@@ -79,16 +79,14 @@ bool CodeGenFunction::shouldEmitTaintedPtrDerefAdaptor(CodeGenModule &CGM,
     //return false;
 
     if (BaseTy->isUncheckedPointerType())
-      return false;
-
-    if (!BaseTy->isTaintedPointerType())
         return false;
 
-    if (BaseTy->isFunctionType() || BaseTy->isFunctionPointerType())
+    if((!(BaseTy->isTaintedPointerType() || BaseTy->isTaintedStructureType())
+        || BaseTy->isFunctionType() || BaseTy->isFunctionPointerType()))
         return false;
 
     if (BaseTy->isCheckedPointerType() || BaseTy->isCheckedArrayType())
-      return false;
+        return false;
 
     return true;
 

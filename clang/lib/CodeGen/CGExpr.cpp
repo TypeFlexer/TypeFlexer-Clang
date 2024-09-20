@@ -5356,7 +5356,10 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
        * Step 4: delete the final pointer
        */
       llvm::Value* InstrumentedVal = NULL;
-      if (isFieldAnArrowAccess)
+      if (isFieldAnArrowAccess && !field->getParent()->isTaintedStruct())
+        InstrumentedVal = EmitTaintedPtrDerefAdaptor(addr,
+                                                     field->getParent()->getTypeForDecl()->getCoreTypeInternal());
+      else if (field->getParent()->isTaintedStruct())
         InstrumentedVal = EmitTaintedPtrDerefAdaptor(addr,
                                                      BaseExpr->getType());
       if(InstrumentedVal != NULL)
