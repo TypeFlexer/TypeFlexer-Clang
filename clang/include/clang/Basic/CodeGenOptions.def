@@ -103,6 +103,7 @@ CODEGENOPT(XRayInstrumentFunctions , 1, 0) ///< Set when -fxray-instrument is
                                            ///< enabled.
 CODEGENOPT(StackSizeSection  , 1, 0) ///< Set when -fstack-size-section is enabled.
 CODEGENOPT(wasmsbx               , 1, 0) ///< -fwasmsbx. //Set WASM SANDBOX
+CODEGENOPT(linksbx               , 1, 0) ///< -fwasmsbx. //Set WASM SANDBOX
 CODEGENOPT(noopsbx               , 1, 0) ///< -fnoopsbx. //Set NOOP SANDBOX
 CODEGENOPT(heapsbx               , 1, 0) ///< -fheapsbx. //Set HEAP SANDBOX
 CODEGENOPT(ForceDwarfFrameSection , 1, 0) ///< Set when -fforce-dwarf-frame is

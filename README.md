@@ -131,13 +131,11 @@ int main() {
 ```
 ### Steps to compile (WASM SBX)
 
-NOTE: Make sure you have install sandbox libraries (ninja checkcbox-libs)
 ```
-clang -fwasmsbx modified.c
+clang -fwasmsbx -linksbx modified.c
 ```
 ### Steps to compile (HEAP SBX)
 
-NOTE: Make sure you have install sandbox libraries (ninja checkcbox-libs)
 ```
-clang -fheapsbx modified.c
+clang -fheapsbx -linksbx modified.c
 ```

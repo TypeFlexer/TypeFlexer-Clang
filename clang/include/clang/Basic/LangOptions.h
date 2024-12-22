@@ -336,6 +336,7 @@ public:
   bool IsHeaderFile = false;
 
   bool Wasmsbx = false; // Corresponds to -fwasmsbx
+  bool linksbx = false;
   bool Noopsbx = false; // Corresponds to -fnoopsbx
   bool Heapsbx = false; // Corresponds to -fheapsbx
 

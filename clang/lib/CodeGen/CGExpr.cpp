@@ -4329,208 +4329,68 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
                                                bool Accessed) {
   bool shouldCheckSanity = true;
   Expr *LoopExpr = nullptr;
-  if (E->getBase()->getType()->isTaintedPointerType() && !CGM.getLangOpts().Noopsbx)
-  {
-      LoopExpr = isInsideLoop(E);
 
-      if (LoopExpr)
-          shouldCheckSanity = false;
+  // Determine if we're inside a loop and need to skip sanity checks
+  if (E->getBase()->getType()->isTaintedPointerType() && !CGM.getLangOpts().Noopsbx) {
+    LoopExpr = isInsideLoop(E);
+    if (LoopExpr)
+      shouldCheckSanity = false;
   }
 
-  // The index must always be an integer, which is not an aggregate.  Emit it
-  // in lexical order (this complexity is, sadly, required by C++17).
-  llvm::Value *IdxPre =
-          (E->getLHS() == E->getIdx()) ? EmitScalarExpr(E->getIdx()) : nullptr;
+  // Emit the index expression
+  llvm::Value *IdxPre = (E->getLHS() == E->getIdx()) ? EmitScalarExpr(E->getIdx()) : nullptr;
   bool SignedIndices = false;
+
+  // Lambda to emit the index after processing
   auto EmitIdxAfterBase = [&, IdxPre](bool Promote) -> llvm::Value * {
-      auto *Idx = IdxPre;
-      if (E->getLHS() != E->getIdx()) {
-        assert(E->getRHS() == E->getIdx() && "index was neither LHS nor RHS");
-        Idx = EmitScalarExpr(E->getIdx());
-      }
+    auto *Idx = IdxPre;
+    if (E->getLHS() != E->getIdx()) {
+      assert(E->getRHS() == E->getIdx() && "Index was neither LHS nor RHS");
+      Idx = EmitScalarExpr(E->getIdx());
+    }
 
-      QualType IdxTy = E->getIdx()->getType();
-      bool IdxSigned = IdxTy->isSignedIntegerOrEnumerationType();
-      SignedIndices |= IdxSigned;
+    QualType IdxTy = E->getIdx()->getType();
+    bool IdxSigned = IdxTy->isSignedIntegerOrEnumerationType();
+    SignedIndices |= IdxSigned;
 
-      if (SanOpts.has(SanitizerKind::ArrayBounds))
-        EmitBoundsCheck(E, E->getBase(), Idx, IdxTy, Accessed);
+    if (SanOpts.has(SanitizerKind::ArrayBounds))
+      EmitBoundsCheck(E, E->getBase(), Idx, IdxTy, Accessed);
 
-      // Extend or truncate the index type to 32 or 64-bits.
-      if (Promote && Idx->getType() != IntPtrTy)
-        Idx = Builder.CreateIntCast(Idx, IntPtrTy, IdxSigned, "idxprom");
+    // Extend or truncate the index type to pointer-sized integer
+    if (Promote && Idx->getType() != IntPtrTy)
+      Idx = Builder.CreateIntCast(Idx, IntPtrTy, IdxSigned, "idxprom");
 
-      return Idx;
+    return Idx;
   };
   IdxPre = nullptr;
 
   QualType BaseTy = E->getBase()->getType();
 
-  // If the base is a vector type, then we are forming a vector element lvalue
-  // with this subscript.
+  // **Define ElementTy Here**
+  QualType ElementTy;
+  const ArrayType *arrayType = getContext().getAsArrayType(BaseTy);
+  if (arrayType != nullptr) {
+    ElementTy = arrayType->getElementType();
+  } else if (BaseTy->isPointerType()) {
+    ElementTy = BaseTy->getPointeeType();
+  } else {
+    // Handle error: BaseTy is neither array nor pointer type.
+    llvm::report_fatal_error("Base type is neither array nor pointer type in EmitArraySubscriptExpr");
+  }
+
+  // If the base is a vector type, handle vector element access
   if (BaseTy->isVectorType() && !isa<ExtVectorElementExpr>(E->getBase())) {
-    // Emit the vector as an lvalue to get its address.
+    // Emit the vector as an lvalue to get its address
     LValue LHS = EmitLValue(E->getBase());
     auto *Idx = EmitIdxAfterBase(/*Promote*/ false);
-    assert(LHS.isSimple() && "Can only subscript lvalue vectors here!");
+    assert(LHS.isSimple() && "Can only subscript simple lvalue vectors here!");
     Address Addr = LHS.getAddress(*this);
 
     EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
-    auto *TaintedPtrFromOffset =
-            EmitTaintedPtrDerefAdaptor(Addr, BaseTy);
+    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy);
 
     if (TaintedPtrFromOffset != NULL) {
-      // check if -m32 flag is set
-      auto CharUnitsSz =  CharUnits::Four();
-      if (getTarget().getTriple().getArch() == llvm::Triple::x86)
-      {
-        CharUnitsSz = CharUnits::Two();
-      }
-      else if (getTarget().getTriple().getArch() == llvm::Triple::x86_64)
-      {
-        CharUnitsSz = CharUnits::Four();
-      }
-      Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
-    }
-
-    if (LoopExpr) {
-      // Create a constant value of -1 (as a placeholder for MaxIdx)
-      llvm::Value *MaxIdx = Idx;
-
-      // Convert the pointer (Addr) to an i64 integer type
-      llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
-      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
-    }
-
-    EmitDynamicNonNullCheck(Addr, BaseTy);
-    LValue LV = LValue::MakeVectorElt(Addr, Idx, E->getBase()->getType(),
-                                      LHS.getBaseInfo(), TBAAAccessInfo());
-
-    EmitDynamicBoundsCheck(LV.getVectorAddress(), E->getBoundsExpr(),
-                           E->getBoundsCheckKind(), nullptr);
-
-    return LV;
-  }
-
-  // All the other cases basically behave like simple offsetting.
-
-  // Handle the extvector case we ignored above.
-  if (isa<ExtVectorElementExpr>(E->getBase())) {
-    LValue LV = EmitLValue(E->getBase());
-    auto *Idx = EmitIdxAfterBase(/*Promote*/ true);
-    Address Addr = EmitExtVectorElementLValue(LV);
-
-    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
-    if (TaintedPtrFromOffset != NULL) {
-      Addr = Address(TaintedPtrFromOffset, Addr.getAlignment());
-      LV.setAddress(Addr);
-    }
-
-    if (LoopExpr) {
-      // Generate the LLVM IR for evaluating LoopExpr
-      llvm::Value *LoopBoundValue = EmitScalarExpr(LoopExpr);
-
-      llvm::Type *Int64Ty = llvm::Type::getInt64Ty(CGM.getLLVMContext());
-      LValueBaseInfo BaseInfo;
-      TBAAAccessInfo TBAAInfo;
-
-      // Check if LoopBoundValue is a pointer, and if so, load the value it points to
-      if (LoopBoundValue->getType()->isPointerTy()) {
-        // Emit the address with alignment from the LoopExpr
-        Address const Addr = EmitPointerWithAlignment(LoopExpr, &BaseInfo, &TBAAInfo);
-        LoopBoundValue = Builder.CreateLoad(Addr, "loopbound.load");
-      } else if (LoopBoundValue->getType() != Int64Ty) {
-        // Cast the value to Int64 if it's not already
-        LoopBoundValue = Builder.CreateIntCast(LoopBoundValue, Int64Ty, true, "loopbound.cast");
-      }
-
-      // Assign the loaded or cast value to MaxIdx
-      llvm::Value *MaxIdx = LoopBoundValue;
-
-      // Convert the pointer (Addr) to an i64 integer type
-      llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), Int64Ty);
-
-      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
-    }
-
-    EmitDynamicNonNullCheck(Addr, BaseTy);
-    QualType EltType = LV.getType()->castAs<VectorType>()->getElementType();
-    Addr = emitArraySubscriptGEP(*this, Addr, Idx, EltType, /*inbounds*/ true,
-                                 SignedIndices, E->getExprLoc());
-    LValue AddrLV = MakeAddrLValue(Addr, EltType, LV.getBaseInfo(),
-                                   CGM.getTBAAInfoForSubobject(LV, EltType));
-    EmitDynamicBoundsCheck(Addr, E->getBoundsExpr(), E->getBoundsCheckKind(),
-                           nullptr);
-
-    return AddrLV;
-  }
-
-  LValueBaseInfo EltBaseInfo;
-  TBAAAccessInfo EltTBAAInfo;
-  Address Addr = Address::invalid();
-  if (const VariableArrayType *vla =
-          getContext().getAsVariableArrayType(E->getType())) {
-    // The base must be a pointer, which is not an aggregate.  Emit
-    // it.  It needs to be emitted first in case it's what captures
-    // the VLA bounds.
-    Addr = EmitPointerWithAlignment(E->getBase(), &EltBaseInfo, &EltTBAAInfo);
-    auto *Idx = EmitIdxAfterBase(/*Promote*/ true);
-    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
-    if (TaintedPtrFromOffset != NULL) {
-      // check if -m32 flag is set
-      auto CharUnitsSz = CharUnits::Four();
-      if (getTarget().getTriple().getArch() == llvm::Triple::x86) {
-        CharUnitsSz = CharUnits::Two();
-      } else if (getTarget().getTriple().getArch() == llvm::Triple::x86_64) {
-        CharUnitsSz = CharUnits::Four();
-      }
-      Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
-    }
-
-    if (LoopExpr) {
-      // Create a constant value of -1 (as a placeholder for MaxIdx)
-      llvm::Value *MaxIdx = Idx;
-
-      // Convert the pointer (Addr) to an i64 integer type
-      llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
-
-      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
-    }
-
-    EmitDynamicNonNullCheck(Addr, BaseTy);
-    // The element count here is the total number of non-VLA elements.
-    llvm::Value *numElements = getVLASize(vla).NumElts;
-
-    // Effectively, the multiply by the VLA size is part of the GEP.
-    // GEP indexes are signed, and scaling an index isn't permitted to
-    // signed-overflow, so we use the same semantics for our explicit
-    // multiply.  We suppress this if overflow is not undefined behavior.
-    if (getLangOpts().isSignedOverflowDefined()) {
-      Idx = Builder.CreateMul(Idx, numElements);
-    } else {
-      Idx = Builder.CreateNSWMul(Idx, numElements);
-    }
-
-    Addr = emitArraySubscriptGEP(*this, Addr, Idx, vla->getElementType(),
-                                 !getLangOpts().isSignedOverflowDefined(),
-                                 SignedIndices, E->getExprLoc());
-
-  } else if (const ObjCObjectType *OIT =
-          E->getType()->getAs<ObjCObjectType>()) {
-    // Indexing over an interface, as in "NSString *P; P[4];"
-
-    // Emit the base pointer.
-    Addr = EmitPointerWithAlignment(E->getBase(), &EltBaseInfo, &EltTBAAInfo);
-    auto *Idx = EmitIdxAfterBase(/*Promote*/ true);
-
-    CharUnits InterfaceSize = getContext().getTypeSizeInChars(OIT);
-    llvm::Value *InterfaceSizeVal =
-            llvm::ConstantInt::get(Idx->getType(), InterfaceSize.getQuantity());
-
-    llvm::Value *ScaledIdx = Builder.CreateMul(Idx, InterfaceSizeVal);
-    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
-    if (TaintedPtrFromOffset != NULL) {
-      // check if -m32 flag is set
+      // Adjust alignment based on target architecture
       auto CharUnitsSz = CharUnits::Four();
       if (getTarget().getTriple().getArch() == llvm::Triple::x86) {
         CharUnitsSz = CharUnits::Two();
@@ -4544,9 +4404,174 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 
-      // Convert the pointer (Addr) to an i64 integer type
-      llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
-      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
+      // **Compute the size of the element type in bytes**
+      uint64_t TypeSizeInBytes = getContext().getTypeSizeInChars(ElementTy).getQuantity();
+
+      // **Scale the index by element size**
+      llvm::Value *RawIndex = MaxIdx;  // The unscaled index
+      llvm::Value *ElementSizeConst =
+          llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
+
+      // Multiply index * element_size to get ScaledIndex
+      llvm::Value *ScaledIndex =
+          Builder.CreateMul(RawIndex, ElementSizeConst, "ScaledIdx");
+
+      // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), ScaledIndex);
+    }
+
+    EmitDynamicNonNullCheck(Addr, BaseTy);
+    LValue LV = LValue::MakeVectorElt(Addr, Idx, E->getBase()->getType(),
+                                      LHS.getBaseInfo(), TBAAAccessInfo());
+
+    EmitDynamicBoundsCheck(LV.getVectorAddress(), E->getBoundsExpr(),
+                           E->getBoundsCheckKind(), nullptr);
+
+    return LV;
+  }
+
+  // Handle the extended vector element case
+  if (isa<ExtVectorElementExpr>(E->getBase())) {
+    LValue LV = EmitLValue(E->getBase());
+    auto *Idx = EmitIdxAfterBase(/*Promote*/ true);
+    Address Addr = EmitExtVectorElementLValue(LV);
+
+    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
+    if (TaintedPtrFromOffset != NULL) {
+      Addr = Address(TaintedPtrFromOffset, Addr.getAlignment());
+      LV.setAddress(Addr);
+    }
+
+    if (LoopExpr) {
+      // Assign the provided Idx to MaxIdx
+      llvm::Value *MaxIdx = Idx;
+
+      // **Compute the size of the element type in bytes**
+      uint64_t TypeSizeInBytes = getContext().getTypeSizeInChars(ElementTy).getQuantity();
+
+      // **Scale the index by element size**
+      llvm::Value *RawIndex = MaxIdx;  // The unscaled index
+      llvm::Value *ElementSizeConst =
+          llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
+
+      // Multiply index * element_size to get ScaledIndex
+      llvm::Value *ScaledIndex =
+          Builder.CreateMul(RawIndex, ElementSizeConst, "ScaledIdx");
+      // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), ScaledIndex);
+    }
+
+    EmitDynamicNonNullCheck(Addr, BaseTy);
+    QualType EltType = LV.getType()->castAs<VectorType>()->getElementType();
+    Addr = emitArraySubscriptGEP(*this, Addr, Idx, EltType, /*inbounds*/ true,
+                                 SignedIndices, E->getExprLoc());
+    LValue AddrLV = MakeAddrLValue(Addr, EltType, LV.getBaseInfo(),
+                                   CGM.getTBAAInfoForSubobject(LV, EltType));
+
+    EmitDynamicBoundsCheck(Addr, E->getBoundsExpr(), E->getBoundsCheckKind(),
+                           nullptr);
+
+    return AddrLV;
+  }
+
+  LValueBaseInfo EltBaseInfo;
+  TBAAAccessInfo EltTBAAInfo;
+  Address Addr = Address::invalid();
+
+  // Handle Variable Length Arrays (VLAs)
+  if (const VariableArrayType *vla = getContext().getAsVariableArrayType(E->getType())) {
+    Addr = EmitPointerWithAlignment(E->getBase(), &EltBaseInfo, &EltTBAAInfo);
+    auto *Idx = EmitIdxAfterBase(/*Promote*/ true);
+    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
+    if (TaintedPtrFromOffset != NULL) {
+      // Adjust alignment based on target architecture
+      auto CharUnitsSz = CharUnits::Four();
+      if (getTarget().getTriple().getArch() == llvm::Triple::x86) {
+        CharUnitsSz = CharUnits::Two();
+      } else if (getTarget().getTriple().getArch() == llvm::Triple::x86_64) {
+        CharUnitsSz = CharUnits::Four();
+      }
+      Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
+    }
+
+    if (LoopExpr) {
+      // Assign the provided Idx to MaxIdx
+      llvm::Value *MaxIdx = Idx;
+
+      // **Compute the size of the element type in bytes**
+      uint64_t TypeSizeInBytes = getContext().getTypeSizeInChars(ElementTy).getQuantity();
+
+      // **Scale the index by element size**
+      llvm::Value *RawIndex = MaxIdx;  // The unscaled index
+      llvm::Value *ElementSizeConst =
+          llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
+
+      // Multiply index * element_size to get ScaledIndex
+      llvm::Value *ScaledIndex =
+          Builder.CreateMul(RawIndex, ElementSizeConst, "ScaledIdx");
+
+      // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), ScaledIndex);
+    }
+
+    EmitDynamicNonNullCheck(Addr, BaseTy);
+    // Get the number of elements in the VLA
+    llvm::Value *numElements = getVLASize(vla).NumElts;
+
+    // Multiply index by the number of elements to get the scaled index
+    if (getLangOpts().isSignedOverflowDefined()) {
+      Idx = Builder.CreateMul(Idx, numElements);
+    } else {
+      Idx = Builder.CreateNSWMul(Idx, numElements);
+    }
+
+    Addr = emitArraySubscriptGEP(*this, Addr, Idx, vla->getElementType(),
+                                 !getLangOpts().isSignedOverflowDefined(),
+                                 SignedIndices, E->getExprLoc());
+  }
+  // Handle Objective-C Object Types
+  else if (const ObjCObjectType *OIT = E->getType()->getAs<ObjCObjectType>()) {
+    // Emit the base pointer
+    Addr = EmitPointerWithAlignment(E->getBase(), &EltBaseInfo, &EltTBAAInfo);
+    auto *Idx = EmitIdxAfterBase(/*Promote*/ true);
+
+    // Compute the size of the Objective-C interface
+    CharUnits InterfaceSize = getContext().getTypeSizeInChars(OIT);
+    llvm::Value *InterfaceSizeVal =
+            llvm::ConstantInt::get(Idx->getType(), InterfaceSize.getQuantity());
+
+    // Scale the index by the size of the interface
+    llvm::Value *ScaledIdx = Builder.CreateMul(Idx, InterfaceSizeVal);
+    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
+    if (TaintedPtrFromOffset != NULL) {
+      // Adjust alignment based on target architecture
+      auto CharUnitsSz = CharUnits::Four();
+      if (getTarget().getTriple().getArch() == llvm::Triple::x86) {
+        CharUnitsSz = CharUnits::Two();
+      } else if (getTarget().getTriple().getArch() == llvm::Triple::x86_64) {
+        CharUnitsSz = CharUnits::Four();
+      }
+      Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
+    }
+
+    if (LoopExpr) {
+      // Assign the provided Idx to MaxIdx
+      llvm::Value *MaxIdx = Idx;
+
+      // **Compute the size of the element type in bytes**
+      uint64_t TypeSizeInBytes = getContext().getTypeSizeInChars(ElementTy).getQuantity();
+
+      // **Scale the index by element size**
+      llvm::Value *RawIndex = MaxIdx;  // The unscaled index
+      llvm::Value *ElementSizeConst =
+          llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
+
+      // Multiply index * element_size to get ScaledIndex
+      llvm::Value *ScaledIndex =
+          Builder.CreateMul(RawIndex, ElementSizeConst, "ScaledIdx");
+
+      // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), ScaledIndex);
     }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
@@ -4565,29 +4590,31 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
                                   SignedIndices, E->getExprLoc());
     Addr = Address(EltPtr, EltAlign);
 
-    // Cast back.
+    // Cast back to the original pointer type
     Addr = Builder.CreateBitCast(Addr, OrigBaseTy);
-  } else if (const Expr *Array = isSimpleArrayDecayOperand(E->getBase())) {
-    // If this is A[i] where A is an array, the frontend will have decayed the
-    // base to be a ArrayToPointerDecay implicit cast.  While correct, it is
-    // inefficient at -O0 to emit a "gep A, 0, 0" when codegen'ing it, then a
-    // "gep x, i" here.  Emit one "gep A, 0, i".
+  }
+  // Handle simple array decay (e.g., when the array decays to a pointer)
+  else if (const Expr *Array = isSimpleArrayDecayOperand(E->getBase())) {
+    // Ensure the base type is indeed an array type
     assert(Array->getType()->isArrayType() &&
            "Array to pointer decay must have array source type!");
     LValue ArrayLV;
-    // For simple multidimensional array indexing, set the 'accessed' flag for
-    // better bounds-checking of the base expression.
+
+    // For multidimensional array indexing, set the 'accessed' flag for better bounds checking
     if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(Array))
       ArrayLV = EmitArraySubscriptExpr(ASE, /*Accessed*/ true);
     else
       ArrayLV = EmitLValue(Array);
+
     auto *Idx = EmitIdxAfterBase(/*Promote*/ true);
 
     EmitDynamicNonNullCheck(ArrayLV.getAddress(*this), BaseTy);
+
     /*
-     * Ideally the below would make no sense because there are no tainted array types
+     * Note: The following assumes no tainted array types.
+     * Adjustments may be needed based on specific sandboxing requirements.
      */
-    // Propagate the alignment from the array itself to the result.
+    // Propagate the alignment from the array itself to the result
     QualType arrayType = Array->getType();
     Addr = emitArraySubscriptGEP(
             *this, ArrayLV.getAddress(*this), {CGM.getSize(CharUnits::Zero()), Idx},
@@ -4595,8 +4622,10 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
             E->getExprLoc(), &arrayType, E->getBase());
     EltBaseInfo = ArrayLV.getBaseInfo();
     EltTBAAInfo = CGM.getTBAAInfoForSubobject(ArrayLV, E->getType());
-  } else {
-    // The base must be a pointer; emit it with an estimate of its alignment.
+  }
+  // Handle generic pointer types
+  else {
+    // Emit the base pointer with estimated alignment
     Addr = EmitPointerWithAlignment(E->getBase(), &EltBaseInfo, &EltTBAAInfo);
     auto *Idx = EmitIdxAfterBase(/*Promote*/ true);
     QualType ptrType = E->getBase()->getType();
@@ -4606,17 +4635,27 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 
-      // Convert the pointer (Addr) to an i64 integer type
-      llvm::Value *Address = Builder.CreatePtrToInt(Addr.getPointer(), llvm::Type::getInt64Ty(CGM.getLLVMContext()));
+      // **Compute the size of the element type in bytes**
+      uint64_t TypeSizeInBytes = getContext().getTypeSizeInChars(ElementTy).getQuantity();
 
-      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), MaxIdx);
+      // **Scale the index by element size**
+      llvm::Value *RawIndex = MaxIdx;  // The unscaled index
+      llvm::Value *ElementSizeConst =
+          llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
+
+      // Multiply index * element_size to get ScaledIndex
+      llvm::Value *ScaledIndex =
+          Builder.CreateMul(RawIndex, ElementSizeConst, "ScaledIdx");
+      // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), ScaledIndex);
     }
 
-    // do tainted pointer crap only if not in loops, else let the CGLoop module handle it
+    // Handle tainted pointers if necessary
     auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
     if (TaintedPtrFromOffset != NULL)
     {
-      auto CharUnitsSz =  CharUnits::Four();
+      // Adjust alignment based on target architecture
+      auto CharUnitsSz = CharUnits::Four();
       if (getTarget().getTriple().getArch() == llvm::Triple::x86)
       {
         CharUnitsSz = CharUnits::Two();
@@ -4627,13 +4666,11 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       }
       Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
     }
-    // if the field  type is a tainted pointer type, then perform a temp alloca creation
-    // and store the value of the pointer dereference into the temp alloca
-    // and return the temp alloca address
+    // If the pointer type is tainted, adjust alignment accordingly
     if (ptrType->isTaintedPointerType())
     {
-      // check if -m32 flag is set
-      auto CharUnitsSz =  CharUnits::Four();
+      // Adjust alignment based on target architecture
+      auto CharUnitsSz = CharUnits::Four();
       if (getTarget().getTriple().getArch() == llvm::Triple::x86)
       {
         CharUnitsSz = CharUnits::Two();
@@ -4649,17 +4686,21 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
                                  !getLangOpts().isSignedOverflowDefined(),
                                  SignedIndices, E->getExprLoc(), &ptrType,
                                  E->getBase());
-
   }
+
+  // Create an LValue for the computed address
   LValue LV = MakeAddrLValue(Addr, E->getType(), EltBaseInfo, EltTBAAInfo);
 
+  // Emit dynamic bounds check
   EmitDynamicBoundsCheck(Addr, E->getBoundsExpr(), E->getBoundsCheckKind(),
                          nullptr);
 
+  // Handle Objective-C garbage collection if applicable
   if (getLangOpts().ObjC && getLangOpts().getGC() != LangOptions::NonGC) {
     LV.setNonGC(!E->isOBJCGCCandidate(getContext()));
     setObjCGCLValueClass(getContext(), E, LV);
   }
+
   return LV;
 }
 

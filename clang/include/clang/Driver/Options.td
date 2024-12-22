@@ -2544,6 +2544,10 @@ defm heapsbx : BoolFOption<"heapsbx",
   CodeGenOpts<"heapsbx">, DefaultFalse,
   PosFlag<SetTrue, [CC1Option], "Enables HEAP SBX instrumentation">, NegFlag<SetFalse>>;
 
+defm linksbx : BoolFOption<"linksbx",
+  CodeGenOpts<"linksbx">, DefaultFalse,
+  PosFlag<SetTrue, [CC1Option], "Auto links sandbox specific libraries">, NegFlag<SetFalse>>;
+
 defm stack_size_section : BoolFOption<"stack-size-section",
   CodeGenOpts<"StackSizeSection">, DefaultFalse,
   PosFlag<SetTrue, [CC1Option], "Emit section containing metadata on function stack sizes">,

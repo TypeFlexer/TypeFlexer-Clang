@@ -4659,6 +4659,12 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     //CmdArgs.push_back("-Werror-implicit-function-declaration");
   }
 
+  if (Args.hasFlag(options::OPT_flinksbx,
+                 options::OPT_fno_linksbx, false)) {
+    CmdArgs.push_back("-flinksbx");
+    //CmdArgs.push_back("-Werror-implicit-function-declaration");
+    }
+
   if (Args.hasFlag(options::OPT_fnoopsbx,
                    options::OPT_fno_noopsbx, false)) {
     CmdArgs.push_back("-fnoopsbx");

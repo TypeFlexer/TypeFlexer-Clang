@@ -1023,19 +1023,28 @@ void ToolChain::AddCXXStdlibLibArgs(const ArgList &Args,
 }
 
 void ToolChain::AddWasmSBXLibArgs(const ArgList &Args, ArgStringList &CmdArgs) const {
-  if (Args.hasArg(options::OPT_fwasmsbx)) {
-//    CmdArgs.push_back("-ldl");
-//    CmdArgs.push_back("-lstdc++");
-//    CmdArgs.push_back("-lSBX_CON_LIB");
-//    CmdArgs.push_back("-lisc_lib_final");
+  if (Args.hasArg(options::OPT_fwasmsbx) && Args.hasArg(options::OPT_flinksbx)) {
+    // Add the library search path
+    CmdArgs.push_back("-LsandboxLib/WASM_SBX"); // Relative path to the libraries
+
+    // Add the libraries to link
+    CmdArgs.push_back("-ldl");
+    CmdArgs.push_back("-lstdc++");
+    CmdArgs.push_back("-lSBX_CON_LIB");
+    CmdArgs.push_back("-lisc_lib_final");
   }
 }
 
 void ToolChain::AddHeapSBXLibArgs(const ArgList &Args, ArgStringList &CmdArgs) const {
-  if (Args.hasArg(options::OPT_fheapsbx)) {
+  if (Args.hasArg(options::OPT_fheapsbx) && Args.hasArg(options::OPT_flinksbx)) {
+    // Add the library search path
+    CmdArgs.push_back("-LsandboxLib/HoardLib"); // Relative path to the Hoard library
+
+    // Add the library to link
     CmdArgs.push_back("-lhoard");
   }
 }
+
 /**/
 //void ToolChain::HandleNoOSBX(const ArgList &Args, ArgStringList &CmdArgs) const {
 //  if (Args.hasArg(options::OPT_fnoosbx)) {
