@@ -18,7 +18,7 @@ int main() {
 
   // Print the array elements
   for(int i = 0; i < 5; ++i) {
-    printf("%l ", arr[i]);
+    printf("%f", arr[i]);
   }
   printf("\n");
 

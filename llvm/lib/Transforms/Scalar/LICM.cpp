@@ -1343,136 +1343,93 @@ LoopInvariantCodeMotion::getMaxRangesUsingLVI(const std::vector<PHINode *> &PhiN
                                               Instruction *CurLoc,
                                               Loop *L,
                                               BasicBlock *Preheader,
-                                              DominatorTree *DT, llvm::CallInst *CallInst) {
-    // Map to store the PHINode and its corresponding max range value
-    std::map<PHINode *, Value *> MaxRanges;
+                                              DominatorTree *DT,
+                                              llvm::CallInst *CallInst) {
+  std::map<PHINode *, Value *> MaxRanges;
 
-    LLVM_DEBUG(dbgs() << "Starting getMaxRangesUsingLVI for loop: "
-                      << L->getHeader()->getName()
-                      << " with " << PhiNodes.size() << " PHINodes.\n");
+  LLVM_DEBUG(dbgs() << "Starting getMaxRangesUsingLVI for loop: "
+                    << L->getHeader()->getName()
+                    << " with " << PhiNodes.size() << " PHINodes.\n");
 
-    // Iterate over each PHINode in the vector
-    for (PHINode *Phi : PhiNodes) {
-        // Ensure the PHINode is valid
-        if (!Phi) {
-            LLVM_DEBUG(dbgs() << "Skipping a null PHINode.\n");
-            continue;
-        }
-
-        if (!Phi->getType()->isIntegerTy()) {
-            // Check if the PHINode has only one incoming edge
-            LLVM_DEBUG(dbgs() << "PHINode " << *Phi
-                              << " is not of integer type but has only one incoming edge, attempting loop bound analysis.\n");
-            // Try to find the loop bound instruction
-            llvm::Instruction *LoopBoundInst = FindLoopBoundInstruction(static_cast<llvm::Instruction*>(Phi), L,
-                                                                        Preheader, DT, CallInst);
-            if (LoopBoundInst) {
-                MaxRanges[Phi] = LoopBoundInst;
-                LLVM_DEBUG(dbgs() << "Loop bound instruction found for PHINode "
-                                  << *Phi << ": "
-                                  << *LoopBoundInst << "\n");
-            } else {
-                LLVM_DEBUG(dbgs() << "Failed to find loop bound instruction for PHINode "
-                                  << *Phi << "\n");
-            }
-            continue;
-        }
-
-        LLVM_DEBUG(dbgs() << "Analyzing PHINode: " << *Phi
-                          << " in basic block: "
-                          << Phi->getParent()->getName() << "\n");
-
-        // Try to get the constant range for the PHINode at the current instruction location
-        ConstantRange CR = LVI->getConstantRange(Phi, CurLoc);
-        LLVM_DEBUG(dbgs() << "LVI returned range for PHINode "
-                          << *Phi << " at "
-                          << *CurLoc << ": " << CR << "\n");
-
-        // If the range is unbounded, try using the PHINode itself as the location
-        if (CR.isFullSet()) {
-            LLVM_DEBUG(dbgs() << "PHINode " << *Phi
-                              << " has an unbounded range at CurLoc, retrying with the PHINode's location.\n");
-            // Retry with the PHINode as the new context
-            CR = LVI->getConstantRange(Phi, Phi);
-            LLVM_DEBUG(dbgs() << "LVI returned range for PHINode "
-                              << *Phi << " at itself: "
-                              << CR << "\n");
-        }
-
-        // Check if the new range is bounded
-        if (!CR.isFullSet()) {
-            // Get the upper bound of the constant range
-            APInt UpperBound = CR.getUpper();
-            LLVM_DEBUG(dbgs() << "Upper bound of the range for PHINode "
-                              << *Phi << ": "
-                              << UpperBound << "\n");
-
-            // Get the bit-width of the integer type (e.g., 32 for i32)
-            unsigned BitWidth = UpperBound.getBitWidth();
-
-            // Check for the signed full integer range
-            APInt IntMin = APInt::getSignedMinValue(BitWidth);
-            APInt IntMax = APInt::getSignedMaxValue(BitWidth);
-
-            LLVM_DEBUG(dbgs() << "Signed range for bit-width "
-                              << BitWidth << ": ["
-                              << IntMin << ", "
-                              << IntMax << "]\n");
-
-            // Ensure that the range is not the full signed integer range (e.g., [-2147483648, 2147483647) for i32)
-            if (UpperBound != IntMax && CR.getLower() != IntMin) {
-                // If not the full range, compute the max range and store it
-                auto MaxRangeValue = ConstantInt::get(Phi->getType(), UpperBound.getLimitedValue());
-
-                // Store the PHINode and its corresponding max range in the map
-                MaxRanges[Phi] = MaxRangeValue;
-
-                LLVM_DEBUG(dbgs() << "Max range for PHINode "
-                                  << *Phi << " computed and stored: "
-                                  << *MaxRangeValue << "\n");
-            } else {
-                // Log and retry finding the loop bound instruction if the range covers the full signed range
-                LLVM_DEBUG(dbgs() << "PHINode " << *Phi
-                                  << " has a full signed range, retrying with loop bound analysis.\n");
-
-                // Retry finding the loop bound with instruction-based analysis
-                llvm::Instruction *LoopBoundInst = FindLoopBoundInstruction(static_cast<llvm::Instruction*>(Phi), L,
-                                                                            Preheader, DT, CallInst);
-                if (LoopBoundInst) {
-                    MaxRanges[Phi] = LoopBoundInst;
-                    LLVM_DEBUG(dbgs() << "Loop bound instruction found for PHINode "
-                                      << *Phi << ": "
-                                      << *LoopBoundInst << "\n");
-                } else {
-                    LLVM_DEBUG(dbgs() << "Failed to find loop bound instruction for PHINode "
-                                      << *Phi << "\n");
-                }
-            }
-        } else {
-            // Log that the PHINode remains unbounded and retry using the loop bound instruction
-            LLVM_DEBUG(dbgs() << "PHINode " << *Phi
-                              << " has an unbounded range, retrying with loop bound analysis.\n");
-
-            // Retry finding the loop bound with instruction-based analysis
-            llvm::Instruction *LoopBoundInst = FindLoopBoundInstruction(static_cast<llvm::Instruction*>(Phi), L,
-                                                                        Preheader, DT, CallInst);
-            if (LoopBoundInst) {
-                MaxRanges[Phi] = LoopBoundInst;
-                LLVM_DEBUG(dbgs() << "Loop bound instruction found for PHINode "
-                                  << *Phi << ": "
-                                  << *LoopBoundInst << "\n");
-            } else {
-                LLVM_DEBUG(dbgs() << "Failed to find loop bound instruction for PHINode "
-                                  << *Phi << "\n");
-            }
-        }
+  for (PHINode *Phi : PhiNodes) {
+    if (!Phi) {
+      LLVM_DEBUG(dbgs() << "Skipping a null PHINode.\n");
+      continue;
+    }
+    // If Phi is not integer-typed, fallback to loop-bound logic
+    if (!Phi->getType()->isIntegerTy()) {
+      LLVM_DEBUG(dbgs() << "PHINode " << *Phi
+                        << " is not integer-typed; calling FindLoopBoundInstruction.\n");
+      if (auto *LoopBoundInst = FindLoopBoundInstruction(Phi, L, Preheader, DT, CallInst)) {
+        MaxRanges[Phi] = LoopBoundInst;
+        LLVM_DEBUG(dbgs() << "Found loop-bound inst for PHINode " << *Phi << ": "
+                          << *LoopBoundInst << "\n");
+      }
+      continue;
     }
 
-    LLVM_DEBUG(dbgs() << "Completed getMaxRangesUsingLVI, found "
-                      << MaxRanges.size() << " PHINodes with valid max ranges.\n");
+    // Attempt LVI
+    ConstantRange CR = LVI->getConstantRange(Phi, CurLoc);
+    LLVM_DEBUG(dbgs() << "LVI range for PHINode " << *Phi << " @ " << *CurLoc << ": " << CR << "\n");
+    if (CR.isFullSet()) {
+      // Retry at the Phi itself
+      LLVM_DEBUG(dbgs() << "FullSet -> retrying at PHINode location.\n");
+      CR = LVI->getConstantRange(Phi, Phi);
+      LLVM_DEBUG(dbgs() << "Retry range @ PHI: " << CR << "\n");
+    }
 
-    // Return the map containing all PHINodes and their corresponding max range values
-    return MaxRanges;
+    if (!CR.isFullSet()) {
+      APInt UpperBound = CR.getUpper();
+      APInt LowerBound = CR.getLower();
+      LLVM_DEBUG(dbgs() << "  - LVI upper: " << UpperBound << ", lower: " << LowerBound << "\n");
+
+      unsigned BitWidth = UpperBound.getBitWidth();
+      APInt IntMin = APInt::getSignedMinValue(BitWidth);
+      APInt IntMax = APInt::getSignedMaxValue(BitWidth);
+      bool IsMinusOne = (BitWidth == 32 && UpperBound.getLimitedValue() == 4294967295ULL);
+
+      // Additional check for effectively degenerate range (like 0..-1).
+      // Suppose we detect a scenario where the limitedValue is 4294967295 (== -1 in 32-bit).
+      // That is essentially "unbounded" from LVI's perspective in your pass.
+      bool IsDegenerate = false;
+      // For example: if UpperBound.getLimitedValue() >= (1ULL << 31) ...
+      uint64_t LimitedUVal = UpperBound.getLimitedValue();
+      if (LimitedUVal == (uint64_t)-1) {
+        IsDegenerate = true;
+      }
+
+      if (UpperBound != IntMax && LowerBound != IntMin && !IsDegenerate && !IsMinusOne) {
+        // Great, store the range
+        auto MaxRangeValue = ConstantInt::get(Phi->getType(), UpperBound.getLimitedValue());
+        MaxRanges[Phi] = MaxRangeValue;
+        LLVM_DEBUG(dbgs() << "Storing max range for PHINode " << *Phi << ": "
+                          << *MaxRangeValue << "\n");
+      } else {
+        LLVM_DEBUG(dbgs() << "Range is effectively full, or degenerate => fallback.\n");
+        // Fallback: use loop-bound logic
+        if (auto *LoopBoundInst = FindLoopBoundInstruction(Phi, L, Preheader, DT, CallInst)) {
+          MaxRanges[Phi] = LoopBoundInst;
+          LLVM_DEBUG(dbgs() << "Loop-bound inst found: " << *LoopBoundInst << "\n");
+        } else {
+          LLVM_DEBUG(dbgs() << "Could not find loop-bound inst => no max range.\n");
+        }
+      }
+    } else {
+      // FullSet scenario => fallback
+      LLVM_DEBUG(dbgs() << "Unbounded => use loop-bound analysis.\n");
+      if (auto *LoopBoundInst = FindLoopBoundInstruction(Phi, L, Preheader, DT, CallInst)) {
+        MaxRanges[Phi] = LoopBoundInst;
+        LLVM_DEBUG(dbgs() << "Loop-bound inst found: " << *LoopBoundInst << "\n");
+      } else {
+        LLVM_DEBUG(dbgs() << "No loop-bound inst => no max range.\n");
+      }
+    }
+  }
+
+  LLVM_DEBUG(dbgs() << "Completed getMaxRangesUsingLVI, found "
+                    << MaxRanges.size() << " PHINodes with valid max ranges.\n");
+
+  return MaxRanges;
 }
 
 bool isWhileLoop(Loop *L) {
