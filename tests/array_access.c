@@ -8,17 +8,17 @@ void do_not_optimize(int x) {
 }
 
 int main() {
-  _TPtr<int> arr = t_malloc<int>(5);
-
+  _TPtr<double> arr = t_malloc<double>(128);
+  double bound = 129;
   // Initialize the array with squares of indices
-  for(int i = 0; i < 5; ++i) {
+  for(int i = 0; i < bound; ++i) {
     arr[i] = i * i;
     do_not_optimize(arr[i]); // Prevent loop from being optimized away
   }
 
   // Print the array elements
   for(int i = 0; i < 5; ++i) {
-    printf("%d ", arr[i]);
+    printf("%l ", arr[i]);
   }
   printf("\n");
 
