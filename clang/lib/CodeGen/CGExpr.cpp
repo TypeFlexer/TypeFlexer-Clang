@@ -4394,8 +4394,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     assert(LHS.isSimple() && "Can only subscript simple lvalue vectors here!");
     Address Addr = LHS.getAddress(*this);
 
-    EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
-    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy);
+    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, false);
 
     if (TaintedPtrFromOffset != NULL) {
       // Adjust alignment based on target architecture
@@ -4409,25 +4408,21 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     }
 
     //this case is only for hardware specific intrinsics or specific compilers
-    // if (LoopExpr) {
-    //   // Assign the provided Idx to MaxIdx
-    //   llvm::Value *MaxIdx = Idx;
-    //
-    //   // **Compute the size of the element type in bytes**
-    //   uint64_t TypeSizeInBytes = getContext().getTypeSizeInChars(ElementTy).getQuantity();
-    //
-    //   // **Scale the index by element size**
-    //   llvm::Value *RawIndex = MaxIdx;  // The unscaled index
-    //   llvm::Value *ElementSizeConst =
-    //       llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
-    //
-    //   // Multiply index * element_size to get ScaledIndex
-    //   llvm::Value *ScaledIndex =
-    //       Builder.CreateMul(RawIndex, ElementSizeConst, "ScaledIdx");
-    //
-    //   // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
-    //   HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), ScaledIndex);
-    // }
+    if (LoopExpr && isO2OptimizationSet) {
+      // Assign the provided Idx to MaxIdx
+      llvm::Value *MaxIdx = Idx;
+
+      // **Compute the size of the element type in bytes**
+      uint64_t TypeSizeInBytes = getContext().getTypeSizeInChars(ElementTy).getQuantity();
+
+      // **Scale the index by element size**
+      llvm::Value *RawIndex = MaxIdx;  // The unscaled index
+      llvm::Value *ElementSizeConst =
+          llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
+
+      // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
+      HandleSandboxingCheck (CGM, Builder, Addr.getPointer(), RawIndex, ElementSizeConst);
+    }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
     LValue LV = LValue::MakeVectorElt(Addr, Idx, E->getBase()->getType(),
@@ -4445,7 +4440,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     auto *Idx = EmitIdxAfterBase(/*Promote*/ true);
     Address Addr = EmitExtVectorElementLValue(LV);
 
-    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
+    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, false);
     if (TaintedPtrFromOffset != NULL) {
       Addr = Address(TaintedPtrFromOffset, Addr.getAlignment());
       LV.setAddress(Addr);
@@ -4495,7 +4490,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
   if (const VariableArrayType *vla = getContext().getAsVariableArrayType(E->getType())) {
     Addr = EmitPointerWithAlignment(E->getBase(), &EltBaseInfo, &EltTBAAInfo);
     auto *Idx = EmitIdxAfterBase(/*Promote*/ true);
-    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
+    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, false);
     if (TaintedPtrFromOffset != NULL) {
       // Adjust alignment based on target architecture
       auto CharUnitsSz = CharUnits::Four();
@@ -4558,7 +4553,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
 
     // Scale the index by the size of the interface
     llvm::Value *ScaledIdx = Builder.CreateMul(Idx, InterfaceSizeVal);
-    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
+    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, false);
     if (TaintedPtrFromOffset != NULL) {
       // Adjust alignment based on target architecture
       auto CharUnitsSz = CharUnits::Four();
@@ -4666,7 +4661,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     }
 
     // Handle tainted pointers if necessary
-    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, shouldCheckSanity);
+    auto *TaintedPtrFromOffset = EmitTaintedPtrDerefAdaptor(Addr, BaseTy, true);
     if (TaintedPtrFromOffset != NULL)
     {
       // Adjust alignment based on target architecture
@@ -4701,13 +4696,6 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
                                  !getLangOpts().isSignedOverflowDefined(),
                                  SignedIndices, E->getExprLoc(), &ptrType,
                                  E->getBase());
-
-    if (isTaintedPtrIndexing && (!LoopExpr || !isO2OptimizationSet)) {
-      // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
-      HandleSandboxingCheck_WithoutOptimizmation (CGM, Builder,
-                                                 Addr.getPointer());
-    }
-
   }
 
   // Create an LValue for the computed address

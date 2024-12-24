@@ -453,33 +453,49 @@ Value *IRBuilderBase::AddHeap_condition(Module* M, Value *Address){
 
 static Value* addWasm_condition(IRBuilderBase* Builder, Module* M_, Value* Address) {
 #ifndef DEBUG_SANITY_CHECK
-    // 1. Retrieve the Module if not provided
-    if (M_ == nullptr) {
+   if (M_ == nullptr)
         M_ = Builder->GetInsertBlock()->getParent()->getParent();
-    }
 
-    // 2. Fetch the global variable 'sbxHeapRange'
-    GlobalVariable* sbxHeapRange = M_->getNamedGlobal("sbxHeapRange");
+    // Fetch global variables
+    GlobalVariable *sbxHeapRange = M_->getNamedGlobal("sbxHeapRange");
+    GlobalVariable *sbxHeapBase = M_->getNamedGlobal("sbxHeap");
 
-    if (!sbxHeapRange) {
-        llvm::errs() << "Error: Global variable 'sbxHeapRange' not found!\n";
+    if (!sbxHeapRange || !sbxHeapBase) {
+        llvm::errs() << "Error: Global variable 'sbxHeapRange' or 'sbxHeapBase' not found!\n";
         return nullptr;
     }
 
-    // 3. Load 'sbxHeapRange' with its actual type
-    Type* sbxHeapRangeType = sbxHeapRange->getValueType();
-    Value* sbxHeapRangeVal = Builder->CreateAlignedLoad(
-        sbxHeapRangeType, sbxHeapRange,
-        llvm::Align(8), /*isVolatile=*/false, "sbxHeapRangeLoaded");
+    // Check if the global values are already loaded in the current basic block
+    Value *SbxHeapRangeLoadedVal = nullptr;
 
-    // 4. Ensure Address is an integer type. If it's a pointer, convert it to i64.
-    if (!Address->getType()->isIntegerTy(64)) {
-        Address = Builder->CreatePtrToInt(Address, Type::getInt64Ty(M_->getContext()), "AddressInt");
+    if (!SbxHeapRangeLoadedVal) {
+        SbxHeapRangeLoadedVal = Builder->CreateAlignedLoad(
+                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapRange, llvm::Align(8), false);
     }
 
-    // 5. Compare Address directly against 'sbxHeapRange': Address < sbxHeapRange
-    Value* isWithinBounds = Builder->CreateICmpULT(
-        Address, sbxHeapRangeVal, "SandMem.TaintCheck");
+
+    //Value *OffsetValWithHeap = Builder->CreateAdd(SbxHeapBaseLoadedVal, Address);
+    Value *OffsetValWithHeap = Builder->CreateAnd(Address, ConstantInt::get(Address->getType(), 0xFFFFFFFF));
+    Value *OffsetValWithHeapPlusMaxIndex = nullptr;
+    if (OffsetValWithHeap->getType()->getIntegerBitWidth() < 64) {
+        OffsetValWithHeapPlusMaxIndex = Builder->CreateZExt(OffsetValWithHeap, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
+        Value *ConditionVal = Builder->CreateICmpULT(OffsetValWithHeapPlusMaxIndex, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
+        return ConditionVal;
+    } else {
+        OffsetValWithHeapPlusMaxIndex = OffsetValWithHeap;
+    }
+
+    if (!isa<Instruction>(OffsetValWithHeapPlusMaxIndex) ||
+        !cast<Instruction>(OffsetValWithHeapPlusMaxIndex)->isBinaryOp() ||
+        cast<BinaryOperator>(OffsetValWithHeapPlusMaxIndex)->getOpcode() != Instruction::And) {
+
+        // Perform an AND operation with UINT32_MAX (0xFFFFFFFF)
+        Value *Mask = ConstantInt::get(llvm::Type::getInt64Ty(M_->getContext()), UINT32_MAX);
+        OffsetValWithHeapPlusMaxIndex = Builder->CreateAnd(OffsetValWithHeapPlusMaxIndex, Mask, "OffsetValMasked");
+    }
+
+     // 5. Compare Address directly against 'sbxHeapRange': Address < sbxHeapRange
+     Value *isWithinBounds = Builder->CreateICmpULT(OffsetValWithHeapPlusMaxIndex, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
 
     // 6. Create the trap-or-continue logic
     Function* CurFunc = Builder->GetInsertBlock()->getParent();
