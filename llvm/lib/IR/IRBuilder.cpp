@@ -416,92 +416,98 @@ static CallInst *fetchSbxHeapBound(IRBuilderBase *Builder, Module *M_){
 }
 //#define DEBUG_SANITY_CHECK
 
-static CallInst *VerifyIndexableAddress(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
-  // If the module is not provided, get it from the current insertion point
+static CallInst *VerifyIndexableAddress(
+    IRBuilderBase *Builder, Module *M_,
+    Value *Address, Value *MaxIndex, Value *StrideLength) {
+
   if (M_ == nullptr)
     M_ = Builder->GetInsertBlock()->getParent()->getParent();
 
-  // Fetch the declaration for the intrinsic or function to check the address
-  auto *Decl = Intrinsic::VerifyIndexableAddress(M_);
-
-  // Ensure that the declaration is of the correct function type
+  Function *Decl = Intrinsic::VerifyIndexableAddress(M_);
   assert(Decl && "Intrinsic 'c_licm_verify_addr' not found!");
 
-  // Create an array of the operands (Address and MaxIndex)
-  Value *Ops[] = { Address, MaxIndex };
-
-  // Create and return the call instruction, which returns an i1
+  // Now we pass three arguments
+  Value *Ops[] = { Address, MaxIndex, StrideLength };
   return Builder->CreateCall(Decl, Ops);
 }
 
-static CallInst *VerifyIndexableAddress_Heap(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex) {
-    // If the module is not provided, get it from the current insertion point
-    if (M_ == nullptr)
-        M_ = Builder->GetInsertBlock()->getParent()->getParent();
 
-    // Fetch the declaration for the intrinsic or function to check the address
-    auto *Decl = Intrinsic::VerifyIndexableAddress_Heap(M_);
+static CallInst *VerifyIndexableAddress_Heap(
+    IRBuilderBase *Builder, Module *M_,
+    Value *Address, Value *MaxIndex, Value *StrideLength) {
 
-    // Ensure that the declaration is of the correct function type
-    assert(Decl && "Intrinsic 'c_verify_addr_heapsbx' not found!");
+  if (M_ == nullptr)
+    M_ = Builder->GetInsertBlock()->getParent()->getParent();
 
-    // Create an array of the operands (Address and MaxIndex)
-    Value *Ops[] = { Address, MaxIndex };
+  Function *Decl = Intrinsic::VerifyIndexableAddress_Heap(M_);
+  assert(Decl && "Intrinsic 'c_verify_addr_heapsbx' not found!");
 
-    // Create and return the call instruction, which returns an i1
-    return Builder->CreateCall(Decl, Ops);
+  Value *Ops[] = { Address, MaxIndex, StrideLength };
+  return Builder->CreateCall(Decl, Ops);
 }
-
 
 Value *IRBuilderBase::AddHeap_condition(Module* M, Value *Address){
     //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
     return addHeap_condition(this, M, Address);
 }
 
-static Value *addWasm_condition(IRBuilderBase *Builder, Module *M_, Value *Address) {
-    if (M_ == nullptr)
+static Value* addWasm_condition(IRBuilderBase* Builder, Module* M_, Value* Address) {
+#ifndef DEBUG_SANITY_CHECK
+    // 1. Retrieve the Module if not provided
+    if (M_ == nullptr) {
         M_ = Builder->GetInsertBlock()->getParent()->getParent();
+    }
 
-    // Fetch global variables
-    GlobalVariable *sbxHeapRange = M_->getNamedGlobal("sbxHeapRange");
-    GlobalVariable *sbxHeapBase = M_->getNamedGlobal("sbxHeap");
+    // 2. Fetch the global variable 'sbxHeapRange'
+    GlobalVariable* sbxHeapRange = M_->getNamedGlobal("sbxHeapRange");
 
-    if (!sbxHeapRange || !sbxHeapBase) {
-        llvm::errs() << "Error: Global variable 'sbxHeapRange' or 'sbxHeapBase' not found!\n";
+    if (!sbxHeapRange) {
+        llvm::errs() << "Error: Global variable 'sbxHeapRange' not found!\n";
         return nullptr;
     }
 
-    // Check if the global values are already loaded in the current basic block
-    Value *SbxHeapRangeLoadedVal = nullptr;
+    // 3. Load 'sbxHeapRange' with its actual type
+    Type* sbxHeapRangeType = sbxHeapRange->getValueType();
+    Value* sbxHeapRangeVal = Builder->CreateAlignedLoad(
+        sbxHeapRangeType, sbxHeapRange,
+        llvm::Align(8), /*isVolatile=*/false, "sbxHeapRangeLoaded");
 
-    if (!SbxHeapRangeLoadedVal) {
-        SbxHeapRangeLoadedVal = Builder->CreateAlignedLoad(
-                llvm::Type::getInt64Ty(M_->getContext()), sbxHeapRange, llvm::Align(8), false);
+    // 4. Ensure Address is an integer type. If it's a pointer, convert it to i64.
+    if (!Address->getType()->isIntegerTy(64)) {
+        Address = Builder->CreatePtrToInt(Address, Type::getInt64Ty(M_->getContext()), "AddressInt");
     }
 
+    // 5. Compare Address directly against 'sbxHeapRange': Address < sbxHeapRange
+    Value* isWithinBounds = Builder->CreateICmpULT(
+        Address, sbxHeapRangeVal, "SandMem.TaintCheck");
 
-    //Value *OffsetValWithHeap = Builder->CreateAdd(SbxHeapBaseLoadedVal, Address);
-    Value *OffsetValWithHeap = Builder->CreateAnd(Address, ConstantInt::get(Address->getType(), 0xFFFFFFFF));
-    Value *OffsetValWithHeapPlusMaxIndex = nullptr;
-    if (OffsetValWithHeap->getType()->getIntegerBitWidth() < 64) {
-        OffsetValWithHeapPlusMaxIndex = Builder->CreateZExt(OffsetValWithHeap, llvm::Type::getInt64Ty(M_->getContext()), "OffsetValWithHeap64");
-        Value *ConditionVal = Builder->CreateICmpULT(OffsetValWithHeapPlusMaxIndex, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
-        return ConditionVal;
-    } else {
-        OffsetValWithHeapPlusMaxIndex = OffsetValWithHeap;
+    // 6. Create the trap-or-continue logic
+    Function* CurFunc = Builder->GetInsertBlock()->getParent();
+    LLVMContext& Context = M_->getContext();
+
+    // Create 'FailBB' and 'ContBB' blocks
+    BasicBlock* FailBB = BasicBlock::Create(Context, "wasm.trap.fail", CurFunc);
+    BasicBlock* ContBB = BasicBlock::Create(Context, "wasm.trap.cont", CurFunc);
+
+    // Insert conditional branch based on 'isWithinBounds'
+    Builder->CreateCondBr(isWithinBounds, ContBB, FailBB);
+
+    // ---------- FailBB ----------
+    Builder->SetInsertPoint(FailBB);
+    {
+        // Insert a call to llvm.trap()
+        Function* TrapFn = Intrinsic::getDeclaration(M_, Intrinsic::trap);
+        Builder->CreateCall(TrapFn);
+        Builder->CreateUnreachable();
     }
 
-    if (!isa<Instruction>(OffsetValWithHeapPlusMaxIndex) ||
-        !cast<Instruction>(OffsetValWithHeapPlusMaxIndex)->isBinaryOp() ||
-        cast<BinaryOperator>(OffsetValWithHeapPlusMaxIndex)->getOpcode() != Instruction::And) {
+    // ---------- ContBB ----------
+    Builder->SetInsertPoint(ContBB);
+    // IRBuilder is now in the 'continue' block after passing the check.
 
-        // Perform an AND operation with UINT32_MAX (0xFFFFFFFF)
-        Value *Mask = ConstantInt::get(llvm::Type::getInt64Ty(M_->getContext()), UINT32_MAX);
-        OffsetValWithHeapPlusMaxIndex = Builder->CreateAnd(OffsetValWithHeapPlusMaxIndex, Mask, "OffsetValMasked");
-    }
-
-    Value *ConditionVal = Builder->CreateICmpULT(OffsetValWithHeapPlusMaxIndex, SbxHeapRangeLoadedVal, "SandMem.TaintCheck");
-    return ConditionVal;
+    // 7. Return the condition if needed
+    return isWithinBounds;
+#endif
 }
 
 static void
@@ -795,14 +801,15 @@ CallInst *IRBuilderBase::FetchSbxHeapBound(Module* M){
     return fetchSbxHeapBound(this, M);
 }
 
-CallInst *IRBuilderBase::VerifyIndexableAddressFunc(Module* M, Value *Address, Value *MaxIndex){
-  //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
-  return VerifyIndexableAddress(this, M, Address, MaxIndex);
+CallInst *IRBuilderBase::VerifyIndexableAddressFunc(
+    Module *M, Value *Address, Value *MaxIndex, Value *strideLength) {
+  return ::VerifyIndexableAddress(this, M, Address, MaxIndex, strideLength);
 }
 
-CallInst *IRBuilderBase::VerifyIndexableAddressFunc_Heap(Module* M, Value *Address, Value *MaxIndex){
-    //if the parsed Source Value is not a Unsigned int, it must be casted to a Unsigned int -->
-    return VerifyIndexableAddress_Heap(this, M, Address, MaxIndex);
+
+CallInst *IRBuilderBase::VerifyIndexableAddressFunc_Heap(
+    Module *M, Value *Address, Value *MaxIndex, Value *strideLength) {
+  return ::VerifyIndexableAddress_Heap(this, M, Address, MaxIndex, strideLength);
 }
 
 void
@@ -1825,36 +1832,123 @@ void IRBuilderBase::Call_Check_and_trap_HEAPSBX(IRBuilderBase *Builder, Module *
 #endif
 }
 
-Value *IRBuilderBase::addHeap_condition(IRBuilderBase *Builder, Module *M_, Value *Address) {
+Value* IRBuilderBase::addHeap_condition(IRBuilderBase *Builder, Module *M_, Value *Address) {
     if (M_ == nullptr)
         M_ = Builder->GetInsertBlock()->getParent()->getParent();
 
     LLVMContext &Context = M_->getContext();
 
+    // Retrieve global variables lowerbound_1 and upperbound_1
     GlobalVariable *lowerbound_1 = M_->getNamedGlobal("lowerbound_1");
     GlobalVariable *upperbound_1 = M_->getNamedGlobal("upperbound_1");
-    BasicBlock *CurrentBB = Builder->GetInsertBlock();
 
+    // Ensure that both globals exist; if not, emit an error and return
     if (!lowerbound_1 || !upperbound_1) {
-        llvm::errs() << "Error: Global variables not found!\n";
+        llvm::errs() << "Error: Global variables 'lowerbound_1' or 'upperbound_1' not found in module "
+                     << M_->getName() << "!\n";
         return nullptr;
     }
 
-    // Load the global variables
-    Value *lowerboundVal_1 = Builder->CreateAlignedLoad(Type::getInt64Ty(Context), lowerbound_1, llvm::Align(8));
-    Value *upperboundVal_1 = Builder->CreateAlignedLoad(Type::getInt64Ty(Context), upperbound_1, llvm::Align(8));
+    // Load the lower/upper bounds as i64
+    Value *lowerboundVal_1 = Builder->CreateAlignedLoad(
+        Type::getInt64Ty(Context),
+        lowerbound_1,
+        Align(8),
+        "lowerboundVal_1"
+    );
+    Value *upperboundVal_1 = Builder->CreateAlignedLoad(
+        Type::getInt64Ty(Context),
+        upperbound_1,
+        Align(8),
+        "upperboundVal_1"
+    );
 
-    // Adjust Address with MaxIndex if necessary
+    // Start with the incoming Address
     Value *OffsetValWithHeap = Address;
-
     Value *OffsetValWithHeapPlusMaxIndex = OffsetValWithHeap;
 
-    // Generate the ICmp conditions
-    Value *LowerChk = Builder->CreateICmpUGE(OffsetValWithHeapPlusMaxIndex, lowerboundVal_1, "IsoHeap.LowerCheck");
-    Value *UpperChk = Builder->CreateICmpULE(OffsetValWithHeapPlusMaxIndex, upperboundVal_1, "IsoHeap.UpperCheck");
+    // Ensure Address is an i64 (convert pointer or extend i32)
+    if (OffsetValWithHeapPlusMaxIndex->getType()->isPointerTy()) {
+        // Pointer -> i64
+        OffsetValWithHeapPlusMaxIndex = Builder->CreatePtrToInt(
+            OffsetValWithHeapPlusMaxIndex,
+            Type::getInt64Ty(Context),
+            "ptr_to_int64"
+        );
+    }
+    else if (OffsetValWithHeapPlusMaxIndex->getType()->isIntegerTy(32)) {
+        // i32 -> i64
+        OffsetValWithHeapPlusMaxIndex = Builder->CreateZExt(
+            OffsetValWithHeapPlusMaxIndex,
+            Type::getInt64Ty(Context),
+            "zext_to_i64"
+        );
+    }
+    else if (!OffsetValWithHeapPlusMaxIndex->getType()->isIntegerTy(64)) {
+        // Error if it's not i32, i64, or pointer
+        llvm::errs() << "Error: Address must be of type i32, i64, or pointer.\n";
+        return nullptr;
+    }
 
-    // Combine the checks using AND
-    Value *RangeCheck = Builder->CreateAnd(LowerChk, UpperChk, "IsoHeap._1_RangeCheck");
+    // Compare the (i64) pointer with the loaded lower/upper bounds
+    Value *LowerChk = Builder->CreateICmpUGE(
+        OffsetValWithHeapPlusMaxIndex,
+        lowerboundVal_1,
+        "IsoHeap.LowerCheck"
+    );
+    Value *UpperChk = Builder->CreateICmpULE(
+        OffsetValWithHeapPlusMaxIndex,
+        upperboundVal_1,
+        "IsoHeap.UpperCheck"
+    );
+
+    // Combine the two checks into one range check
+    Value *RangeCheck = Builder->CreateAnd(
+        LowerChk,
+        UpperChk,
+        "IsoHeap.RangeCheck"
+    );
+
+    // Create new blocks for the fail path and success (continue) path
+    Function *CurFunc = Builder->GetInsertBlock()->getParent();
+    BasicBlock *FailBB = BasicBlock::Create(Context, "trap.fail", CurFunc);
+    BasicBlock *ContBB = BasicBlock::Create(Context, "trap.cont", CurFunc);
+
+    // Branch on the result of RangeCheck
+    Builder->CreateCondBr(RangeCheck, ContBB, FailBB);
+
+    // ---------- FailBB ----------
+    Builder->SetInsertPoint(FailBB);
+    {
+        // Create IndexArg as a constant i64 0
+        Value *IndexArg = ConstantInt::get(Type::getInt64Ty(Context), 0);
+
+        // Convert AddrArg (i64) to i8* (void*)
+        Type *VoidPtrType = Type::getInt8PtrTy(Context);
+        Value *AddrArgAsVoidPtr = Builder->CreateIntToPtr(
+            OffsetValWithHeapPlusMaxIndex,
+            VoidPtrType,
+            "addr_to_ptr"
+        );
+
+        // Set up the argument array (AddrArgAsVoidPtr is the address, and IndexArg is the index)
+        Value *Ops[] = {AddrArgAsVoidPtr, IndexArg};
+
+        // Get the declaration for the tainted memory check function
+        Function *TaintedMemCheckDecl = Intrinsic::SandboxTaintedMemCheckFunction_2(M_);
+
+        // Call the tainted memory check function (ignore the return value)
+        Builder->CreateCall(TaintedMemCheckDecl, Ops);
+
+        // Instead of making this block unreachable, jump to ContBB to continue execution
+        Builder->CreateBr(ContBB);
+    }
+
+    // ---------- ContBB ----------
+    Builder->SetInsertPoint(ContBB);
+    // IRBuilder is now in the 'continue' block
+
+    // Optionally, return RangeCheck (the i1) if needed for further logic
     return RangeCheck;
 }
 

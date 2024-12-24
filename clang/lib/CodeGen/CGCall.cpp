@@ -4967,7 +4967,7 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
                 EmitTaintedPtrDerefAdaptor(AddrRefOfVal, I->Ty);
             if ((TaintedPtrFromOffset == NULL) && (isTaintedForSure)) {
               TaintedPtrFromOffset =
-                  EmitDynamicTaintedPtrAdaptorBlock(AddrRefOfVal);
+                  EmitDynamicTaintedPtrAdaptorBlock(AddrRefOfVal, true, nullptr, false);
             }
           }
           if (TaintedPtrFromOffset != NULL) {

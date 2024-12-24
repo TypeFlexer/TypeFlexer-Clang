@@ -120,26 +120,46 @@ void CodeGenFunction::EmitDynamicNonNullCheck(const Address BaseAddr,
 }
 
 Value* CodeGenFunction::EmitTaintedPtrDerefAdaptor(const Address BaseAddr,
-                                                const llvm::Type* BaseTy){
-  if(!shouldEmitTaintedPtrDerefAdaptor
-            (CGM, BaseTy))
-        return NULL;
+                                                   llvm::Type* BaseTy, bool shouldCheckSanity, bool requiresLICM) {
+  // Check if we should emit the adaptor
+  if (!shouldEmitTaintedPtrDerefAdaptor(CGM, BaseTy))
+    return nullptr;
 
-    ++NumDynamicChecksTainted;
+  ++NumDynamicChecksTainted;
 
-    return EmitDynamicTaintedPtrAdaptorBlock(BaseAddr);
+  // Compute strideLength based on BaseTy
+  uint64_t ElemSize = CGM.getDataLayout().getTypeStoreSize(BaseTy);
+  // Create a constant integer for strideLength (i64)
+  Value *strideLength = Builder.getInt64(ElemSize);
+
+  // Call EmitDynamicTaintedPtrAdaptorBlock with strideLength
+  // Assuming shouldCheckSanity is false in this overload
+  return EmitDynamicTaintedPtrAdaptorBlock(BaseAddr, /*shouldCheckSanity=*/shouldCheckSanity, strideLength, requiresLICM);
 }
 
 Value* CodeGenFunction::EmitTaintedPtrDerefAdaptor(const Address BaseAddr,
                                                    const QualType BaseTy,
-                                                   bool shouldCheckSanity){
-  if(!shouldEmitTaintedPtrDerefAdaptor
-      (CGM, BaseTy))
-    return NULL;
+                                                   bool shouldCheckSanity, bool requiresLICM) {
+  // Check if we should emit the adaptor
+  if (!shouldEmitTaintedPtrDerefAdaptor(CGM, BaseTy))
+    return nullptr;
 
   ++NumDynamicChecksTainted;
 
-  return EmitDynamicTaintedPtrAdaptorBlock(BaseAddr, shouldCheckSanity);
+  // Convert QualType to llvm::Type*
+  llvm::Type* LLVMBaseTy = CGM.getTypes().ConvertType(BaseTy);
+  if (!LLVMBaseTy) {
+    llvm::errs() << "Error: Failed to convert QualType to llvm::Type*.\n";
+    return nullptr;
+  }
+
+  // Compute strideLength based on LLVMBaseTy
+  uint64_t ElemSize = CGM.getDataLayout().getTypeStoreSize(LLVMBaseTy);
+  // Create a constant integer for strideLength (i64)
+  Value *strideLength = Builder.getInt64(ElemSize);
+
+  // Call EmitDynamicTaintedPtrAdaptorBlock with strideLength
+  return EmitDynamicTaintedPtrAdaptorBlock(BaseAddr, shouldCheckSanity, strideLength, requiresLICM);
 }
 
 
@@ -585,7 +605,7 @@ void CodeGenFunction::EmitDynamicTaintedCacheCheckBlocks(Value *Condition, Value
 }
 
 Value*
-CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool shouldCheckSanity) {
+CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool shouldCheckSanity, llvm::Value* strideLength, bool isLoop) {
 
 
    if (!(CGM.getCodeGenOpts().wasmsbx || CGM.getCodeGenOpts().heapsbx))
@@ -632,7 +652,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
              BaseAddr.getPointer(),
              llvm::Type::getInt32Ty(BaseAddr.getPointer()->getContext()));
 
-     Value *OffsetVal64 = Builder.CreateZExt(
+        Value *OffsetVal64 = Builder.CreateZExt(
             OffsetVal32,
             llvm::Type::getInt64Ty(BaseAddr.getPointer()->getContext()));
      Value *OffsetValWithHeapAndOffset =
@@ -677,19 +697,19 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
                     ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
                 else {
                     // Check the optimization level before calling the function
-                    if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+                    if ((CGM.getCodeGenOpts().OptimizationLevel < 2) || (!isLoop)) { //if its not a loop, then sanity check is on the spot
                         ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
                     }
                     else
-                        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+                        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx, strideLength);
                 }
             else {
                 // Check the optimization level before calling the function
-                if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+                if ((CGM.getCodeGenOpts().OptimizationLevel < 2) || (!isLoop)){
                     ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
                 }
                 else
-                    Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
+                    Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx, strideLength);
             }
          }
 
@@ -758,19 +778,19 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
                         ConditionVal = Builder.AddHeap_condition(&CGM.getModule(), Address);
                     else {
                         // Check the optimization level before calling the function
-                        if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+                        if ((CGM.getCodeGenOpts().OptimizationLevel < 2) || (!isLoop)) {
                             ConditionVal = Builder.AddHeap_condition(&CGM.getModule(), Address);
                         }
                         else
-                            Builder.VerifyIndexableAddressFunc_Heap(&CGM.getModule(), Address, MaxIdx);
+                            Builder.VerifyIndexableAddressFunc_Heap(&CGM.getModule(), Address, MaxIdx, strideLength);
                     }
                 else {
                     // Check the optimization level before calling the function
-                    if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
+                    if ((CGM.getCodeGenOpts().OptimizationLevel < 2) || (!isLoop)) {
                         Builder.AddHeap_condition(&CGM.getModule(), Address);
                     }
                     else
-                        Builder.VerifyIndexableAddressFunc_Heap(&CGM.getModule(), Address, MaxIdx);
+                        Builder.VerifyIndexableAddressFunc_Heap(&CGM.getModule(), Address, MaxIdx, strideLength);
                 }
             }
         }

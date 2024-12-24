@@ -87,10 +87,13 @@
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 #include <algorithm>
-#include <utility>
+#include <functional>
+#include <iosfwd>
+#include <map>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
-#include <queue>
+#include <utility>
 
 using namespace llvm;
 
@@ -213,21 +216,23 @@ private:
   collectAliasInfoForLoopWithMSSA(Loop *L, AAResults *AA,
                                   MemorySSAUpdater *MSSAU);
 
-    std::map<std::pair<Value *, Value *>, CallInst *>
-    eliminateRedundantVerifyAddrCalls(Loop *L, LoopSafetyInfo &SafetyInfo, AliasSetTracker *AST,
-                                      MemorySSAUpdater *MSSAU,
-                                      bool instrumentTaintSanity);
 
     Value *getLoopBound(BasicBlock *IncBlock, Loop *L);
 
     std::map<PHINode *, Value *>
-    getMaxRangesUsingLVI(const std::vector<PHINode *> &PhiNodes, LazyValueInfo *LVI, Instruction *CurLoc,
-                         Loop *L, BasicBlock *Preheader, DominatorTree *DT, llvm::CallInst *CallInst);
+    getMaxRangesUsingLVI(const std::vector<PHINode *> &PhiNodes,
+                         LazyValueInfo *LVI, Instruction *CurLoc, Loop *L,
+                         BasicBlock *Preheader, DominatorTree *DT,
+                         llvm::CallInst *CallInst);
 
-    std::map<std::pair<llvm::Value *, llvm::Value *>, CallInst *>
-    eliminateRedundantVerifyAddrCalls(Loop *L, LoopSafetyInfo &SafetyInfo, AliasSetTracker *AST,
-                                      MemorySSAUpdater *MSSAU,
-                                      bool instrumentTaintSanity, int8_t *sbx_type);
+  std::map<std::tuple<llvm::Value*, llvm::Value*, llvm::Value*>, llvm::CallInst*>
+  eliminateRedundantVerifyAddrCalls(
+      llvm::Loop *L,
+      llvm::LoopSafetyInfo &SafetyInfo,
+      llvm::AliasSetTracker *AST,
+      llvm::MemorySSAUpdater *MSSAU,
+      bool instrumentTaintSanity,
+      int8_t *sbx_type);
 };
 
 struct LegacyLICMPass : public LoopPass {
@@ -1173,51 +1178,77 @@ std::vector<llvm::PHINode *> FindPhiNodesUpwards(llvm::Value *V) {
     return PhiNodes;
 }
 
-std::map<std::pair<llvm::Value *, llvm::Value *>, llvm::CallInst *> LoopInvariantCodeMotion::eliminateRedundantVerifyAddrCalls(
-        llvm::Loop *L, llvm::LoopSafetyInfo &SafetyInfo,
-        llvm::AliasSetTracker *AST,
-        llvm::MemorySSAUpdater *MSSAU,
-        bool instrumentTaintSanity,
-        int8_t* sbx_type)
-{
-    std::map<std::pair<llvm::Value *, llvm::Value *>, llvm::CallInst *> VerifyAddrCalls;
-    llvm::SmallVector<llvm::Instruction *, 8> ToErase;
+static inline std::tuple<Value *, Value *, Value *>
+makeTriple(Value *A, Value *B, Value *C) {
+  return std::make_tuple(A, B, C);
+}
 
+std::map<std::tuple<llvm::Value*, llvm::Value*, llvm::Value*>, llvm::CallInst*>
+LoopInvariantCodeMotion::eliminateRedundantVerifyAddrCalls(
+    llvm::Loop *L,
+    llvm::LoopSafetyInfo &SafetyInfo,
+    llvm::AliasSetTracker *AST,
+    llvm::MemorySSAUpdater *MSSAU,
+    bool instrumentTaintSanity,
+    int8_t *sbx_type)
+{
+    // Initialize the map with tuple keys (Address, MaxIndex, strideLength)
+    std::map<std::tuple<llvm::Value*, llvm::Value*, llvm::Value*>, llvm::CallInst*> VerifyAddrCalls;
+
+    // Vector to hold instructions marked for erasure
+    llvm::SmallVector<llvm::Instruction*, 8> ToErase;
+
+    // Check loop latch block conditions
     if (!CheckLatchBlockConditions(L->getLoopLatch()))
         return VerifyAddrCalls;
-    // Only proceed if the sanity check instrumentation is enabled
+
+    // Proceed only if sanity check instrumentation is enabled
     if (instrumentTaintSanity)
     {
         LLVM_DEBUG(llvm::dbgs() << "Sanity check instrumentation is enabled.\n");
 
-        // Traverse the basic blocks in the loop
+        // Traverse all basic blocks within the loop
         for (llvm::BasicBlock *BB : L->blocks()) {
             LLVM_DEBUG(llvm::dbgs() << "Processing BasicBlock: " << BB->getName() << "\n");
             for (llvm::Instruction &I : *BB) {
+                // Identify call instructions
                 if (auto *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                    // Retrieve the called function
                     if (llvm::Function *Callee = Call->getCalledFunction()) {
-                        // Look for calls to c_verify_addr_wasmsbx
-                        if (Callee->getName() == "c_licm_verify_addr"
-                            || Callee->getName() == "c_verify_addr_heapsbx") {
-                            LLVM_DEBUG(llvm::dbgs() << "Found a sbx call in: " << *Call << "\n");
+                        // Check for specific sandboxing verification functions
+                        if (Callee->getName() == "c_licm_verify_addr" ||
+                            Callee->getName() == "c_verify_addr_heapsbx") {
 
-                            llvm::Value *Arg0 = Call->getArgOperand(0);
-                            llvm::Value *Arg1 = Call->getArgOperand(1);
+                            LLVM_DEBUG(llvm::dbgs() << "Found a sandboxing call: " << *Call << "\n");
 
-                            // Create a key using the pair of arguments
-                            auto Key = std::make_pair(Arg0, Arg1);
+                            // Ensure the call has exactly three arguments
+                            if (Call->getNumArgOperands() != 3) {
+                                LLVM_DEBUG(llvm::dbgs() << "Skipping call due to incorrect number of arguments: " << *Call << "\n");
+                                continue;
+                            }
 
-                            // Check if this combination of arguments has been seen before
-                            if (VerifyAddrCalls.count(Key)) {
-                                // If a duplicate is found, mark the current call for deletion
-                                LLVM_DEBUG(llvm::dbgs() << "Duplicate call found with arguments: (" << *Arg0 << ", " << *Arg1 << ")\n");
+                            // Extract arguments: Address, MaxIndex, strideLength
+                            llvm::Value *Arg0 = Call->getArgOperand(0); // Address
+                            llvm::Value *Arg1 = Call->getArgOperand(1); // MaxIndex
+                            llvm::Value *Arg2 = Call->getArgOperand(2); // strideLength
+
+                            // Create a tuple key using the three arguments
+                            auto Key = std::make_tuple(Arg0, Arg1, Arg2);
+
+                            // Check if this combination has already been encountered
+                            if (VerifyAddrCalls.find(Key) != VerifyAddrCalls.end()) {
+                                // Duplicate call found; mark for deletion
+                                LLVM_DEBUG(llvm::dbgs() << "Duplicate call detected with arguments: ("
+                                                          << *Arg0 << ", " << *Arg1 << ", " << *Arg2 << ")\n");
                                 ToErase.push_back(Call);
                             } else {
-                                // Otherwise, record this call
-                                LLVM_DEBUG(llvm::dbgs() << "Recording new call with arguments: (" << *Arg0 << ", " << *Arg1 << ")\n");
+                                // New unique call; record it in the map
+                                LLVM_DEBUG(llvm::dbgs() << "Recording new sandboxing call with arguments: ("
+                                                          << *Arg0 << ", " << *Arg1 << ", " << *Arg2 << ")\n");
                                 VerifyAddrCalls[Key] = Call;
                             }
 
+                            // Set sbx_type based on the function name
                             if (Callee->getName() == "c_licm_verify_addr")
                                 *sbx_type = 1;
                             else if (Callee->getName() == "c_verify_addr_heapsbx")
@@ -1228,21 +1259,22 @@ std::map<std::pair<llvm::Value *, llvm::Value *>, llvm::CallInst *> LoopInvarian
             }
         }
 
-        // Erase all the redundant instructions after the loop
+        // Erase all redundant calls after traversal
         for (llvm::Instruction *I : ToErase) {
             LLVM_DEBUG(llvm::dbgs() << "Erasing redundant call: " << *I << "\n");
 
             // Replace all uses of the instruction with an undefined value
             I->replaceAllUsesWith(llvm::UndefValue::get(I->getType()));
 
-            // Safely erase the instruction from its parent
+            // Safely erase the instruction from its parent basic block
             I->eraseFromParent();
         }
-    } else {
-        LLVM_DEBUG(llvm::dbgs() << "Sanity check instrumentation is disabled, skipping optimization.\n");
+    }
+    else {
+        LLVM_DEBUG(llvm::dbgs() << "Sanity check instrumentation is disabled; skipping optimization.\n");
     }
 
-    // Return the collected VerifyAddrCalls
+    // Return the map containing unique sandboxing verification calls
     return VerifyAddrCalls;
 }
 
@@ -1602,7 +1634,7 @@ bool LoopInvariantCodeMotion::runOnLoop(
     }
 
     Instruction *VerifyAddrCall = nullptr;
-
+    Instruction *StrideLength = nullptr;
     if (Preheader && Preheader->getParent()->getName().str() == "bignum_init")
         return false;
 
@@ -1613,7 +1645,12 @@ bool LoopInvariantCodeMotion::runOnLoop(
                                                              CurAST.get(), MSSAU.get(), !is_while_loop, &sbx_type);
 
     for (auto VerifyAddrCallPair: VerifyAddrCalls) {
+        const std::tuple<llvm::Value*, llvm::Value*, llvm::Value*> &Key = VerifyAddrCallPair.first;
+        llvm::Value* Addr = std::get<0>(Key);
+        llvm::Value* MaxIndex = std::get<1>(Key);
+        llvm::Value* strideLength = std::get<2>(Key);
         VerifyAddrCall = VerifyAddrCallPair.second;
+
         // Get the loop's induction variable (assumes canonical form)
         // Try to get the loop bound using SCEV
         const SCEV *LoopBoundSCEV = SE->getBackedgeTakenCount(L);
@@ -1691,10 +1728,13 @@ bool LoopInvariantCodeMotion::runOnLoop(
             if (!isAvailableInBlock(OptimalPreheader, NewIndexExpr, DT))
                 continue;
 
+            // Compute ScaledMaxIndex = MaxIndex * strideLength
+            llvm::Value *ScaledMaxIndex = Builder.CreateMul(NewIndexExpr, strideLength, "ScaledMaxIndex");
+
             if (sbx_type == 1)
-                Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(), Address, NewIndexExpr);
+                Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(), Address, ScaledMaxIndex);
             else if (sbx_type == 2)
-                Builder.Verify_heap_ptr_no_optimization(OptimalPreheader->getModule(), Address, NewIndexExpr);
+                Builder.Verify_heap_ptr_no_optimization(OptimalPreheader->getModule(), Address, ScaledMaxIndex);
 
             VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
             // Remove the original VerifyAddrCall from the for.body block
@@ -1853,14 +1893,16 @@ bool LoopInvariantCodeMotion::runOnLoop(
 
             if (LoopBound) {
                 // Create the new call using the VerifyIndexableAddressFunc method
+                llvm::Value *ScaledMaxIndex = Builder.CreateMul(LoopBound, strideLength, "ScaledMaxIndex");
+
                 if (sbx_type == 1)
                     Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(),
                                         DuplicatedAddress,
-                                        LoopBound);
+                                        ScaledMaxIndex);
                 else if (sbx_type == 2)
                     Builder.Verify_heap_ptr_no_optimization(OptimalPreheader->getModule(),
                                                             DuplicatedAddress,
-                                                            LoopBound);
+                                                            ScaledMaxIndex);
                 VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
                 eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
 

@@ -4237,72 +4237,78 @@ Expr *CodeGenFunction::isInsideLoop(const Expr *E) {
   return isInsideLoop(cast<Stmt>(E));
 }
 
-void CodeGenFunction::HandleSandboxingCheck(CodeGenModule &CGM, clang::CodeGen::CGBuilderTy& Builder,
-                                            llvm::Value *Addr, llvm::Value *Idx) {
+void CodeGenFunction::HandleSandboxingCheck(CodeGenModule &CGM,
+                                            clang::CodeGen::CGBuilderTy &Builder,
+                                            llvm::Value *Addr,
+                                            llvm::Value *Idx,
+                                            llvm::Value *strideLength) {
   // Assign the provided Idx to MaxIdx
   llvm::Value *MaxIdx = Idx;
 
-  // Convert the pointer (Addr) to an i64 integer type
-  llvm::Value *Address = Builder.CreatePtrToInt(Addr, llvm::Type::getInt64Ty(CGM.getLLVMContext()));
+  // Convert pointer to i64
+  llvm::Value *Address = Builder.CreatePtrToInt(Addr,
+      llvm::Type::getInt64Ty(CGM.getLLVMContext()));
 
-  if (CGM.getCodeGenOpts().wasmsbx)
-  {
-    // Get the current basic block
+  if (CGM.getCodeGenOpts().wasmsbx) {
+    // Check for duplicates (Address, MaxIdx, strideLength)
     llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
-
-    // Check for duplicates of the same call in the current basic block
     bool IsDuplicate = false;
     for (llvm::Instruction &I : *CurrentBB) {
-      if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-        if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
-          if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
+      if (auto *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+        if (Call->getCalledFunction() &&
+            Call->getCalledFunction()->getName() == "c_licm_verify_addr") {
+          if (Call->getArgOperand(0) == Address &&
+              Call->getArgOperand(1) == MaxIdx &&
+              Call->getArgOperand(2) == strideLength) {
             IsDuplicate = true;
             break;
           }
         }
       }
     }
-
-    // If no duplicate found, insert the call
+    // Insert the call if not duplicate
     if (!IsDuplicate) {
-      // Check the optimization level before calling the function
-      if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
-        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
-      } else {
-        Builder.VerifyIndexableAddressFunc(&CGM.getModule(), Address, MaxIdx);
-      }
+      Builder.VerifyIndexableAddressFunc(
+          &CGM.getModule(), Address, MaxIdx, strideLength);
     }
   }
 
   if (CGM.getCodeGenOpts().heapsbx) {
-    // Get the current basic block
+    // Check for duplicates (Address, MaxIdx, strideLength)
     llvm::BasicBlock *CurrentBB = Builder.GetInsertBlock();
-
-    // Check for duplicates of the same call in the current basic block
     bool IsDuplicate = false;
     for (llvm::Instruction &I : *CurrentBB) {
-      if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-        if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "c_verify_addr_heapsbx") {
-          if (Call->getArgOperand(0) == Address && Call->getArgOperand(1) == MaxIdx) {
+      if (auto *Call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+        if (Call->getCalledFunction() &&
+            Call->getCalledFunction()->getName() == "c_verify_addr_heapsbx") {
+          if (Call->getArgOperand(0) == Address &&
+              Call->getArgOperand(1) == MaxIdx &&
+              Call->getArgOperand(2) == strideLength) {
             IsDuplicate = true;
             break;
           }
         }
       }
     }
-
-    // If no duplicate found, insert the call
     if (!IsDuplicate) {
-      // Check the optimization level before calling the function
-      if (CGM.getCodeGenOpts().OptimizationLevel < 2) {
-        Builder.Verify_heap_ptr_no_optimization(&CGM.getModule(), Address, MaxIdx);
-      } else {
-        Builder.VerifyIndexableAddressFunc_Heap(&CGM.getModule(), Address, MaxIdx);
-      }
+      Builder.VerifyIndexableAddressFunc_Heap(
+          &CGM.getModule(), Address, MaxIdx, strideLength);
     }
   }
+}
 
-  return;
+
+void CodeGenFunction::HandleSandboxingCheck_WithoutOptimizmation(CodeGenModule &CGM, clang::CodeGen::CGBuilderTy& Builder,
+                                            llvm::Value *Addr) {
+  if (CGM.getCodeGenOpts().wasmsbx)
+  {
+    Builder.AddWasm_condition(&CGM.getModule(), Addr);
+  }
+
+  if (CGM.getCodeGenOpts().heapsbx) {
+    // Check the optimization level before calling the function
+    Builder.AddHeap_condition(&CGM.getModule(), Addr);
+  }
 }
 
 bool isDuplicateCall(llvm::BasicBlock *CurrentBB, llvm::Value *Address, llvm::Value *MaxIdx) {
@@ -4329,9 +4335,11 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
                                                bool Accessed) {
   bool shouldCheckSanity = true;
   Expr *LoopExpr = nullptr;
+  bool isTaintedPtrIndexing = E->getBase()->getType()->isTaintedPointerType();
+  bool isO2OptimizationSet = (CGM.getCodeGenOpts().OptimizationLevel >= 2);
 
   // Determine if we're inside a loop and need to skip sanity checks
-  if (E->getBase()->getType()->isTaintedPointerType() && !CGM.getLangOpts().Noopsbx) {
+  if (isTaintedPtrIndexing && !CGM.getLangOpts().Noopsbx) {
     LoopExpr = isInsideLoop(E);
     if (LoopExpr)
       shouldCheckSanity = false;
@@ -4400,25 +4408,26 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
     }
 
-    if (LoopExpr) {
-      // Assign the provided Idx to MaxIdx
-      llvm::Value *MaxIdx = Idx;
-
-      // **Compute the size of the element type in bytes**
-      uint64_t TypeSizeInBytes = getContext().getTypeSizeInChars(ElementTy).getQuantity();
-
-      // **Scale the index by element size**
-      llvm::Value *RawIndex = MaxIdx;  // The unscaled index
-      llvm::Value *ElementSizeConst =
-          llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
-
-      // Multiply index * element_size to get ScaledIndex
-      llvm::Value *ScaledIndex =
-          Builder.CreateMul(RawIndex, ElementSizeConst, "ScaledIdx");
-
-      // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
-      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), ScaledIndex);
-    }
+    //this case is only for hardware specific intrinsics or specific compilers
+    // if (LoopExpr) {
+    //   // Assign the provided Idx to MaxIdx
+    //   llvm::Value *MaxIdx = Idx;
+    //
+    //   // **Compute the size of the element type in bytes**
+    //   uint64_t TypeSizeInBytes = getContext().getTypeSizeInChars(ElementTy).getQuantity();
+    //
+    //   // **Scale the index by element size**
+    //   llvm::Value *RawIndex = MaxIdx;  // The unscaled index
+    //   llvm::Value *ElementSizeConst =
+    //       llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
+    //
+    //   // Multiply index * element_size to get ScaledIndex
+    //   llvm::Value *ScaledIndex =
+    //       Builder.CreateMul(RawIndex, ElementSizeConst, "ScaledIdx");
+    //
+    //   // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
+    //   HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), ScaledIndex);
+    // }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
     LValue LV = LValue::MakeVectorElt(Addr, Idx, E->getBase()->getType(),
@@ -4442,7 +4451,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       LV.setAddress(Addr);
     }
 
-    if (LoopExpr) {
+    if (LoopExpr && isO2OptimizationSet) {
       // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 
@@ -4454,17 +4463,21 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       llvm::Value *ElementSizeConst =
           llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
 
-      // Multiply index * element_size to get ScaledIndex
-      llvm::Value *ScaledIndex =
-          Builder.CreateMul(RawIndex, ElementSizeConst, "ScaledIdx");
       // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
-      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), ScaledIndex);
+      HandleSandboxingCheck (CGM, Builder, Addr.getPointer(), RawIndex, ElementSizeConst);
     }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
     QualType EltType = LV.getType()->castAs<VectorType>()->getElementType();
     Addr = emitArraySubscriptGEP(*this, Addr, Idx, EltType, /*inbounds*/ true,
                                  SignedIndices, E->getExprLoc());
+
+    if (isTaintedPtrIndexing && (!LoopExpr || !isO2OptimizationSet)) {
+      // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
+      HandleSandboxingCheck_WithoutOptimizmation (CGM, Builder,
+                                                 Addr.getPointer());
+    }
+
     LValue AddrLV = MakeAddrLValue(Addr, EltType, LV.getBaseInfo(),
                                    CGM.getTBAAInfoForSubobject(LV, EltType));
 
@@ -4494,7 +4507,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
     }
 
-    if (LoopExpr) {
+    if (LoopExpr && isO2OptimizationSet) {
       // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 
@@ -4506,12 +4519,8 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       llvm::Value *ElementSizeConst =
           llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
 
-      // Multiply index * element_size to get ScaledIndex
-      llvm::Value *ScaledIndex =
-          Builder.CreateMul(RawIndex, ElementSizeConst, "ScaledIdx");
-
       // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
-      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), ScaledIndex);
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), RawIndex, ElementSizeConst);
     }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
@@ -4528,7 +4537,14 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     Addr = emitArraySubscriptGEP(*this, Addr, Idx, vla->getElementType(),
                                  !getLangOpts().isSignedOverflowDefined(),
                                  SignedIndices, E->getExprLoc());
+
+    if (isTaintedPtrIndexing && (!LoopExpr || !isO2OptimizationSet)) {
+      // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
+      HandleSandboxingCheck_WithoutOptimizmation (CGM, Builder,
+                                                 Addr.getPointer());
+    }
   }
+
   // Handle Objective-C Object Types
   else if (const ObjCObjectType *OIT = E->getType()->getAs<ObjCObjectType>()) {
     // Emit the base pointer
@@ -4554,7 +4570,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
     }
 
-    if (LoopExpr) {
+    if (LoopExpr && isO2OptimizationSet) {
       // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 
@@ -4566,12 +4582,8 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       llvm::Value *ElementSizeConst =
           llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
 
-      // Multiply index * element_size to get ScaledIndex
-      llvm::Value *ScaledIndex =
-          Builder.CreateMul(RawIndex, ElementSizeConst, "ScaledIdx");
-
       // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
-      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), ScaledIndex);
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), RawIndex, ElementSizeConst);
     }
 
     EmitDynamicNonNullCheck(Addr, BaseTy);
@@ -4592,6 +4604,12 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
 
     // Cast back to the original pointer type
     Addr = Builder.CreateBitCast(Addr, OrigBaseTy);
+
+    if (isTaintedPtrIndexing && (!LoopExpr || !isO2OptimizationSet)) {
+      // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
+      HandleSandboxingCheck_WithoutOptimizmation (CGM, Builder,
+                                                 Addr.getPointer());
+    }
   }
   // Handle simple array decay (e.g., when the array decays to a pointer)
   else if (const Expr *Array = isSimpleArrayDecayOperand(E->getBase())) {
@@ -4631,7 +4649,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     QualType ptrType = E->getBase()->getType();
     EmitDynamicNonNullCheck(Addr, BaseTy);
 
-    if (LoopExpr) {
+    if (LoopExpr && isO2OptimizationSet) {
       // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 
@@ -4643,11 +4661,8 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       llvm::Value *ElementSizeConst =
           llvm::ConstantInt::get(RawIndex->getType(), TypeSizeInBytes);
 
-      // Multiply index * element_size to get ScaledIndex
-      llvm::Value *ScaledIndex =
-          Builder.CreateMul(RawIndex, ElementSizeConst, "ScaledIdx");
       // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
-      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), ScaledIndex);
+      HandleSandboxingCheck(CGM, Builder, Addr.getPointer(), RawIndex, ElementSizeConst);
     }
 
     // Handle tainted pointers if necessary
@@ -4686,6 +4701,13 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
                                  !getLangOpts().isSignedOverflowDefined(),
                                  SignedIndices, E->getExprLoc(), &ptrType,
                                  E->getBase());
+
+    if (isTaintedPtrIndexing && (!LoopExpr || !isO2OptimizationSet)) {
+      // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
+      HandleSandboxingCheck_WithoutOptimizmation (CGM, Builder,
+                                                 Addr.getPointer());
+    }
+
   }
 
   // Create an LValue for the computed address

@@ -1351,28 +1351,29 @@ Function* Intrinsic::SandboxTaintedMemCheckFunction_2(Module *M){
   return cast<Function>(M->getOrInsertFunction("CacheUpdateandCheck_2", FnType).getCallee());
 }
 
-Function* Intrinsic::VerifyIndexableAddress(Module *M) {
-  // Get the i1 (boolean) type and the 64-bit integer type
-  Type* VoidTy = Type::getVoidTy(M->getContext());
-  Type* Int64Ty = Type::getInt64Ty(M->getContext());
+Function *Intrinsic::VerifyIndexableAddress(Module *M) {
+  // void c_licm_verify_addr(i64 Address, i64 MaxIndex, i64 strideLength)
+  Type *VoidTy   = Type::getVoidTy(M->getContext());
+  Type *Int64Ty  = Type::getInt64Ty(M->getContext());
 
-  // Define the function to take two int64_t arguments and return an i1
-  FunctionType *FuncTy = FunctionType::get(VoidTy, {Int64Ty, Int64Ty}, false);
+  FunctionType *FuncTy = FunctionType::get(
+      VoidTy, { Int64Ty, Int64Ty, Int64Ty }, false);
 
-  // Insert or get the function in the module
-  return cast<Function>(M->getOrInsertFunction("c_licm_verify_addr", FuncTy).getCallee());
+  return cast<Function>(
+      M->getOrInsertFunction("c_licm_verify_addr", FuncTy).getCallee());
 }
 
-Function* Intrinsic::VerifyIndexableAddress_Heap(Module *M) {
-  // Get the i1 (boolean) type and the 64-bit integer type
-  Type* VoidTy = Type::getVoidTy(M->getContext());
-  Type* Int64Ty = Type::getInt64Ty(M->getContext());
 
-  // Define the function to take two int64_t arguments and return an i1
-  FunctionType *FuncTy = FunctionType::get(VoidTy, {Int64Ty, Int64Ty}, false);
+Function *Intrinsic::VerifyIndexableAddress_Heap(Module *M) {
+  // void c_verify_addr_heapsbx(i64 Address, i64 MaxIndex, i64 strideLength)
+  Type *VoidTy   = Type::getVoidTy(M->getContext());
+  Type *Int64Ty  = Type::getInt64Ty(M->getContext());
 
-  // Insert or get the function in the module
-  return cast<Function>(M->getOrInsertFunction("c_verify_addr_heapsbx", FuncTy).getCallee());
+  FunctionType *FuncTy = FunctionType::get(
+      VoidTy, { Int64Ty, Int64Ty, Int64Ty }, false);
+
+  return cast<Function>(
+      M->getOrInsertFunction("c_verify_addr_heapsbx", FuncTy).getCallee());
 }
 
 

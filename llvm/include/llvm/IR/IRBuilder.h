@@ -2750,7 +2750,8 @@ public:
   CallInst *registerCallbackFunction(Value *Src);
     CallInst *unregisterCallbackFunction(Value *Src);
 
-    CallInst *VerifyIndexableAddressFunc(llvm::Module *M, Value*, Value*);
+    CallInst *VerifyIndexableAddressFunc(llvm::Module *M, Value *, Value *,
+                                         Value *strideLength);
 
     Value *AddWasm_condition(Module *M, Value *Address);
 
@@ -2781,7 +2782,9 @@ public:
                                                                 Value *MaxIndex, Instruction *TargetInstr);
     void Call_Check_and_trap_HEAPSBX(IRBuilderBase *Builder, Module *M_, Value *Address, Value *MaxIndex);
 
-    CallInst *VerifyIndexableAddressFunc_Heap(Module *M, Value *Address, Value *MaxIndex);
+    CallInst *VerifyIndexableAddressFunc_Heap(Module *M, Value *Address,
+                                              Value *MaxIndex,
+                                              Value *strideLength);
 
     Value *addHeap_condition(IRBuilderBase *Builder, Module *M_, Value *Address);
 

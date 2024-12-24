@@ -643,7 +643,9 @@ public:
 
   llvm::Value * EmitTaintedPtrDerefAdaptor(const Address BaseAddr,
                                            const QualType BaseTy,
-                                           bool shouldCheckSanity = true);
+                                           bool shouldCheckSanity = true,
+                                           bool requiresLICM = false);
+
   llvm::Value* EmitConditionalTaintedP2OAdaptor(llvm::Value* Base);
   static bool IsBaseExprDecoyExists(CodeGenFunction& CGF, Expr *BaseExpr, llvm::StructType *StructType);
   static bool IsBaseExprDecoyExists(CodeGenFunction &CGF, const RecordDecl *Rec,
@@ -4755,19 +4757,26 @@ private:
   llvm::Value *EmitX86CpuSupports(uint64_t Mask);
   llvm::Value *EmitX86CpuInit();
   llvm::Value *FormResolverCondition(const MultiVersionResolverOption &RO);
-  llvm::Value* EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool shouldCheckSanity = true);
 
   llvm::Type*  ChangeStructName(llvm::StructType *StructType);
 
-  llvm::Value *EmitTaintedPtrDerefAdaptor(const Address BaseAddr,
-                                          const llvm::Type *BaseTy);
+  llvm::Value *EmitTaintedPtrDerefAdaptor(Address BaseAddr, llvm::Type *BaseTy,
+   bool shouldCheckSanity = true,
+   bool requiresLICM = false);
+
   LValue EmitGlobalVarDeclLValue(CodeGenFunction &CGF, const Expr *E,
                                  const VarDecl *VD);
   bool shouldEmitTaintedPtrDerefAdaptor(const CodeGenModule &CGM,
                                         const llvm::Type *BaseTy);
   bool shouldEmitTaintedPtrDerefAdaptor(CodeGenModule &CGM,
                                         const QualType BaseTy);
-  void EmitDynamicTaintedCacheCheckBlocks(llvm::Value *Condition, llvm::Value  *ValPtr);
+  void EmitDynamicTaintedCacheCheckBlocks(llvm::Value *Condition,
+                                          llvm::Value *ValPtr);
+  llvm::Value *EmitDynamicTaintedPtrAdaptorBlock(Address BaseAddr,
+                                                 bool shouldCheckSanity,
+                                                 llvm::Value *strideLength,
+                                                 bool isLoop);
+
   llvm::BasicBlock *EmitTaintedL1_CacheMissBlock(llvm::BasicBlock *, llvm::Value *ValPtr);
   llvm::BasicBlock *EmitTaintedL2_CacheMissBlock(llvm::BasicBlock *, llvm::Value *ValPtr);
 
@@ -4789,7 +4798,12 @@ private:
 
     bool isPointerReassignedInLoop(const ValueDecl *PointerDecl, const Stmt *LoopStmt);
 
-    void HandleSandboxingCheck(CodeGenModule &CGM, CGBuilderTy &Builder, llvm::Value *Addr, llvm::Value *Idx);
+    void HandleSandboxingCheck(CodeGenModule &CGM, CGBuilderTy &Builder,
+                               llvm::Value *Addr, llvm::Value *Idx,
+                               llvm::Value *strideLength);
+    void HandleSandboxingCheck_WithoutOptimizmation(
+        CodeGenModule &CGM, clang::CodeGen::CGBuilderTy &Builder,
+        llvm::Value *Addr);
 
     llvm::BasicBlock *EmitTaintedL3_CacheMissBlock(llvm::BasicBlock *CacheHit, llvm::Value *PointerAsInt64);
 };
