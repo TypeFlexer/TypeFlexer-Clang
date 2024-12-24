@@ -12,6 +12,11 @@ void do_not_optimize_int(int x) {
   asm volatile("" : : "r"(x) : "memory");
 }
 
+typedef struct {
+  int id;
+  double value;
+} MyStruct;
+
 /***********************************************************************
  * TEST 1: Simple for-loop with a constant bound
  * We expect the pass might try to hoist checks outside the loop because
@@ -259,9 +264,39 @@ void test_modified_loop_bound(void) {
   t_free(arr);
 }
 
+// Test 8
+// Test function working with an array of structures
+void test_whileloop_struct(void) {
+  printf("=== test_whileloop_struct ===\n");
+
+  // Allocate memory for an array of structures
+  _TPtr<MyStruct> arr = (_TPtr<MyStruct>)t_malloc(100 * sizeof(MyStruct));
+  if (!arr) {
+    printf("[Error] Allocation failed in test_whileloop_struct.\n");
+    return;
+  }
+
+  // Fill the array while i < 30
+  int i = 0;
+  while (i < 30) {
+    arr[i].id = i;
+    arr[i].value = 2.0 * i;
+    do_not_optimize(arr[i].value);
+    i++;
+  }
+
+  // Print a few elements
+  for (int k = 0; k < 10; ++k) {
+    printf("arr[%d] = { id: %d, value: %.2f }\n", k, arr[k].id, arr[k].value);
+  }
+
+  // Free the allocated memory
+  t_free(arr);
+}
+
 
 /***********************************************************************
- * TEST 8: A big function that just runs all tests
+ * TEST 9: A big function that just runs all tests
  **********************************************************************/
 int main(void) {
   printf("Running various loop optimization tests with Tainted Pointers...\n\n");
@@ -287,6 +322,7 @@ int main(void) {
   // 7. Modified loop bound
   test_modified_loop_bound();
 
+  test_whileloop_struct();
   printf("\nAll tests complete.\n");
   return 0;
 }
