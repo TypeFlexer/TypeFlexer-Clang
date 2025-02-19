@@ -4677,6 +4677,30 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back("-DHEAP_SBX");
   }
 
+  Arg *A2 = Args.getLastArg(options::OPT_O_Group);
+  bool EnableLSM = false;  // Default: LSM is disabled
+
+  if (A2 && A2->getNumValues() > 0) {  // Ensure A2 is not null and has at least one value
+    StringRef OptLevel = A2->getValue();  // Safe to access
+    if (OptLevel == "2" || OptLevel == "3" || OptLevel == "fast") {
+      EnableLSM = true;  // Mark LSM as enabled (unless overridden)
+    }
+  }
+
+  // Handle -flsm flag (user can set only "no")
+  // Handle -fflsm flag (user can set only "no")
+  Arg *LsmArg = Args.getLastArg(options::OPT_fflsm, options::OPT_fno_flsm);
+  if (LsmArg && LsmArg->getOption().matches(options::OPT_fno_flsm)) {
+    CmdArgs.push_back("-fno-flsm");  // ✅ Correct usage
+    EnableLSM = false;  // Override automatic setting
+  }
+
+  // Apply -flsm if it's enabled
+  if (EnableLSM) {
+    CmdArgs.push_back("-fflsm");
+  }
+
+
   if (Args.hasFlag(options::OPT_fheapsbx,
                    options::OPT_fno_heapsbx, false)) {
     CmdArgs.push_back("-fheapsbx");

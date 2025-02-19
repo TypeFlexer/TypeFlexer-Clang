@@ -2548,6 +2548,12 @@ defm linksbx : BoolFOption<"linksbx",
   CodeGenOpts<"linksbx">, DefaultFalse,
   PosFlag<SetTrue, [CC1Option], "Auto links sandbox specific libraries">, NegFlag<SetFalse>>;
 
+defm flsm : BoolFOption<"flsm",
+  CodeGenOpts<"lsm">, DefaultFalse,
+  PosFlag<SetTrue, [CC1Option], "Enable LSM-based optimizations for loop-sensitive memory accesses">,
+  NegFlag<SetFalse, [CC1Option]>>;
+
+
 defm stack_size_section : BoolFOption<"stack-size-section",
   CodeGenOpts<"StackSizeSection">, DefaultFalse,
   PosFlag<SetTrue, [CC1Option], "Emit section containing metadata on function stack sizes">,

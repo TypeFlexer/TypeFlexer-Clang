@@ -620,6 +620,8 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
      return NULL;
     }
 
+    bool isLsmEnabled = CGM.getCodeGenOpts().lsm;
+
     if (CGM.getCodeGenOpts().wasmsbx) {
      //First Fetch the Heap Trackers
      GlobalVariable *sbxHeapBase =  CGM.getModule().getNamedGlobal("sbxHeap");
@@ -630,22 +632,32 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
 
      llvm::Type *BitCastType = BaseAddr.getType();
 
-     if (BitCastType->isTStructTy() || (BitCastType->isPointerTy() &&
-         BitCastType->getCoreElementType()->isTStructTy())) {
+      Address NewBaseAddr = BaseAddr; // Create a mutable copy
 
-         BitCastType = ChangeStructName(
+      if (BitCastType->isTStructTy() ||
+          (BitCastType->isPointerTy() && BitCastType->getCoreElementType()->isTStructTy())) {
+
+        llvm::Type *NewStructType = ChangeStructName(
             reinterpret_cast<StructType *>(BitCastType->getCoreElementType()));
-         if ((BitCastType != NULL) && (BitCastType->isDecoyed())) {
-            llvm::Type *CurrentTypeReferences = BaseAddr.getType();
-            while (CurrentTypeReferences->isPointerTy()) {
-                CurrentTypeReferences = CurrentTypeReferences->getPointerElementType();
-                BitCastType = BitCastType->getPointerTo(0);
-            }
-            BaseAddr.setType(BitCastType);
-         } else {
-             BitCastType = BaseAddr.getType();
-         }
-     }
+
+        if (NewStructType && NewStructType->isDecoyed()) {
+          llvm::Type *CurrentTypeReferences = BaseAddr.getType();
+
+          while (CurrentTypeReferences->isPointerTy()) {
+            CurrentTypeReferences = CurrentTypeReferences->getPointerElementType();
+            NewStructType = NewStructType->getPointerTo(0);
+          }
+
+          // ✅ Use a new bitcast instruction instead of setType()
+          llvm::Value *NewPointer = Builder.CreateBitCast(
+              BaseAddr.getPointer(), NewStructType, "bitcasted_ptr");
+
+          // ✅ Assign the modified value to the new mutable variable
+          NewBaseAddr = Address(NewPointer, BaseAddr.getAlignment());
+        } else {
+          BitCastType = BaseAddr.getType();
+        }
+          }
 
      Value *OffsetValWithHeap = SbxHeapBaseLoadedVal;
      Value *OffsetVal32 = Builder.CreatePtrToInt(
@@ -697,7 +709,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
                     ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
                 else {
                     // Check the optimization level before calling the function
-                    if ((CGM.getCodeGenOpts().OptimizationLevel < 2) || (!isLoop)) { //if its not a loop, then sanity check is on the spot
+                    if ((!isLsmEnabled) || (!isLoop)) { //if its not a loop, then sanity check is on the spot
                         ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
                     }
                     else
@@ -705,7 +717,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
                 }
             else {
                 // Check the optimization level before calling the function
-                if ((CGM.getCodeGenOpts().OptimizationLevel < 2) || (!isLoop)){
+                if ((!isLsmEnabled) || (!isLoop)){
                     ConditionVal = Builder.AddWasm_condition(&CGM.getModule(), Address);
                 }
                 else
@@ -734,8 +746,13 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
      }
 
      Value *CastedPointer = NULL;
-     if (!BaseAddr.getType()->getCoreElementType()->isFunctionTy())
-      CastedPointer = Builder.CreateIntToPtr(PointerVal, DecoyedDestTy);
+     if (!BaseAddr.getType()->getCoreElementType()->isFunctionTy()) {
+       llvm::Type *DecoyedDestPtrTy = DecoyedDestTy;
+       if (DecoyedDestTy->isStructTy()) {
+         DecoyedDestPtrTy = DecoyedDestTy->getPointerTo();
+       }
+       CastedPointer = Builder.CreateIntToPtr(PointerVal, DecoyedDestPtrTy);
+     }
 
      return CastedPointer;
 
@@ -778,7 +795,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
                         ConditionVal = Builder.AddHeap_condition(&CGM.getModule(), Address);
                     else {
                         // Check the optimization level before calling the function
-                        if ((CGM.getCodeGenOpts().OptimizationLevel < 2) || (!isLoop)) {
+                        if ((!isLsmEnabled) || (!isLoop)) {
                             ConditionVal = Builder.AddHeap_condition(&CGM.getModule(), Address);
                         }
                         else
@@ -786,7 +803,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
                     }
                 else {
                     // Check the optimization level before calling the function
-                    if ((CGM.getCodeGenOpts().OptimizationLevel < 2) || (!isLoop)) {
+                    if ((!isLsmEnabled) || (!isLoop)) {
                         Builder.AddHeap_condition(&CGM.getModule(), Address);
                     }
                     else
@@ -803,6 +820,7 @@ CodeGenFunction::EmitDynamicTaintedPtrAdaptorBlock(const Address BaseAddr, bool 
 
     return nullptr;
 }
+
 BasicBlock *CodeGenFunction::EmitDynamicCheckFailedBlock() {
   // Save current insert point
   BasicBlock *Begin = Builder.GetInsertBlock();

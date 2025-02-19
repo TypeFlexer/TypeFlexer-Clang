@@ -4336,7 +4336,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
   bool shouldCheckSanity = true;
   Expr *LoopExpr = nullptr;
   bool isTaintedPtrIndexing = E->getBase()->getType()->isTaintedPointerType();
-  bool isO2OptimizationSet = (CGM.getCodeGenOpts().OptimizationLevel >= 2);
+  bool isLsmEnabled = CGM.getCodeGenOpts().lsm;
 
   // Determine if we're inside a loop and need to skip sanity checks
   if (isTaintedPtrIndexing && !CGM.getLangOpts().Noopsbx) {
@@ -4408,7 +4408,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     }
 
     //this case is only for hardware specific intrinsics or specific compilers
-    if (LoopExpr && isO2OptimizationSet) {
+    if (LoopExpr && isLsmEnabled) {
       // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 
@@ -4446,7 +4446,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       LV.setAddress(Addr);
     }
 
-    if (LoopExpr && isO2OptimizationSet) {
+    if (LoopExpr && isLsmEnabled) {
       // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 
@@ -4467,7 +4467,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     Addr = emitArraySubscriptGEP(*this, Addr, Idx, EltType, /*inbounds*/ true,
                                  SignedIndices, E->getExprLoc());
 
-    if (isTaintedPtrIndexing && (!LoopExpr || !isO2OptimizationSet)) {
+    if (isTaintedPtrIndexing && (!LoopExpr || !isLsmEnabled)) {
       // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
       HandleSandboxingCheck_WithoutOptimizmation (CGM, Builder,
                                                  Addr.getPointer());
@@ -4502,7 +4502,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
     }
 
-    if (LoopExpr && isO2OptimizationSet) {
+    if (LoopExpr && isLsmEnabled) {
       // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 
@@ -4533,7 +4533,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
                                  !getLangOpts().isSignedOverflowDefined(),
                                  SignedIndices, E->getExprLoc());
 
-    if (isTaintedPtrIndexing && (!LoopExpr || !isO2OptimizationSet)) {
+    if (isTaintedPtrIndexing && (!LoopExpr || !isLsmEnabled)) {
       // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
       HandleSandboxingCheck_WithoutOptimizmation (CGM, Builder,
                                                  Addr.getPointer());
@@ -4565,7 +4565,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
       Addr = Address(TaintedPtrFromOffset, CharUnitsSz);
     }
 
-    if (LoopExpr && isO2OptimizationSet) {
+    if (LoopExpr && isLsmEnabled) {
       // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 
@@ -4600,7 +4600,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     // Cast back to the original pointer type
     Addr = Builder.CreateBitCast(Addr, OrigBaseTy);
 
-    if (isTaintedPtrIndexing && (!LoopExpr || !isO2OptimizationSet)) {
+    if (isTaintedPtrIndexing && (!LoopExpr || !isLsmEnabled)) {
       // **Use ScaledIndex instead of MaxIdx in Sandboxing Check**
       HandleSandboxingCheck_WithoutOptimizmation (CGM, Builder,
                                                  Addr.getPointer());
@@ -4644,7 +4644,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
     QualType ptrType = E->getBase()->getType();
     EmitDynamicNonNullCheck(Addr, BaseTy);
 
-    if (LoopExpr && isO2OptimizationSet) {
+    if (LoopExpr && isLsmEnabled) {
       // Assign the provided Idx to MaxIdx
       llvm::Value *MaxIdx = Idx;
 

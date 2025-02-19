@@ -337,8 +337,9 @@ public:
 
   bool Wasmsbx = false; // Corresponds to -fwasmsbx
   bool linksbx = false;
-  bool Noopsbx = false; // Corresponds to -fnoopsbx
+  mutable bool Noopsbx = false; // Corresponds to -fnoopsbx
   bool Heapsbx = false; // Corresponds to -fheapsbx
+  bool lscm = false;
 
   LangOptions();
 

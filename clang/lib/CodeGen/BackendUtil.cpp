@@ -557,6 +557,7 @@ static bool initTargetOptions(DiagnosticsEngine &Diags,
   Options.EmitStackSizeSection = CodeGenOpts.StackSizeSection;
   Options.Emitwasmsbx = CodeGenOpts.wasmsbx;
   Options.Emitnoopsbx= CodeGenOpts.noopsbx;
+  LangOpts.Noopsbx = CodeGenOpts.noopsbx;
   Options.Emitheapsbx = CodeGenOpts.heapsbx;
   Options.EmitAddrsig = CodeGenOpts.Addrsig;
   Options.ForceDwarfFrameSection = CodeGenOpts.ForceDwarfFrameSection;

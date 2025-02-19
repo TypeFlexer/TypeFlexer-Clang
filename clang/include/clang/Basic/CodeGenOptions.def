@@ -106,6 +106,7 @@ CODEGENOPT(wasmsbx               , 1, 0) ///< -fwasmsbx. //Set WASM SANDBOX
 CODEGENOPT(linksbx               , 1, 0) ///< -fwasmsbx. //Set WASM SANDBOX
 CODEGENOPT(noopsbx               , 1, 0) ///< -fnoopsbx. //Set NOOP SANDBOX
 CODEGENOPT(heapsbx               , 1, 0) ///< -fheapsbx. //Set HEAP SANDBOX
+CODEGENOPT(lsm               , 1, 0) ///< -flsm. // Set/Unset LSM Optimization
 CODEGENOPT(ForceDwarfFrameSection , 1, 0) ///< Set when -fforce-dwarf-frame is
                                           ///< enabled.
 

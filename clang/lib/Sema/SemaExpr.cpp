@@ -17417,6 +17417,18 @@ bool Sema::DiagnoseAssignmentResult(AssignConvertType ConvTy,
       return true;
     }
 
+    // Check if noopsbx is enabled
+    if (getLangOpts().Noopsbx) {
+      // Insert an implicit cast to the destination type
+      SrcExpr = ImpCastExprToType(SrcExpr, DstType, CK_BitCast).get();
+
+      // Suppress the error by returning false
+      if (Complained)
+        *Complained = false;
+      return false;
+    }
+
+    // Default behavior: Issue an error
     DiagKind = diag::err_typecheck_convert_incompatible;
     ConvHints.tryToFixConversion(SrcExpr, SrcType, DstType, *this, FDecl);
     MayHaveConvFixit = true;

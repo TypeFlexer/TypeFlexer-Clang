@@ -1838,14 +1838,100 @@ public:
       "Use the version that takes MaybeAlign instead") {
     return CreateAlignedStore(Val, Ptr, MaybeAlign(Align), isVolatile);
   }
+  /// CoerceValToType - Attempt to convert `Val` into `DstTy` using
+/// either bitcast (if same size), trunc, zext, sext, ptrtoint, inttoptr, etc.
+static llvm::Value *CoerceValToType(IRBuilderBase &Builder,
+                                    Value *Val,
+                                    Type *DstTy,
+                                    const DataLayout &DL) {
+  // If already correct, do nothing.
+  if (Val->getType() == DstTy)
+    return Val;
+
+  // If both types are integer but different bit widths, do trunc or zext.
+  if (Val->getType()->isIntegerTy() && DstTy->isIntegerTy()) {
+    unsigned SrcBits = Val->getType()->getIntegerBitWidth();
+    unsigned DstBits = DstTy->getIntegerBitWidth();
+    if (SrcBits > DstBits) {
+      // Truncation
+      return Builder.CreateTrunc(Val, DstTy, "store.val.trunc");
+    } else {
+      // Zero-extension (or sign extension, if that’s what you need).
+      return Builder.CreateZExt(Val, DstTy, "store.val.zext");
+    }
+  }
+
+  // If both are pointer types, check if they have the same size in DataLayout.
+  if (Val->getType()->isPointerTy() && DstTy->isPointerTy()) {
+    uint64_t SrcSize = DL.getTypeSizeInBits(Val->getType());
+    uint64_t DstSize = DL.getTypeSizeInBits(DstTy);
+    if (SrcSize == DstSize) {
+      // We can safely BitCast if same size.
+      return Builder.CreateBitCast(Val, DstTy, "store.val.cast");
+    } else {
+      // If they differ in size, you might do an address-space cast, or
+      // decide that it’s an error, etc. As a placeholder:
+      // e.g. pointer->integer->pointer. But that’s unusual.
+      // We can do a ptrtoint + inttoptr if you truly want to reinterpret bits.
+      // This is somewhat contrived, so do it only if you’re sure that’s valid:
+      auto *IntTy = IntegerType::get(DstTy->getContext(), SrcSize);
+      Value *Tmp = Builder.CreatePtrToInt(Val, IntTy, "tmp.ptrtoint");
+      // Now coerce that integer to the correct size
+      Tmp = CoerceValToType(Builder, Tmp,
+                            IntegerType::get(DstTy->getContext(), DstSize),
+                            DL);
+      return Builder.CreateIntToPtr(Tmp, DstTy, "store.val.inttoptr");
+    }
+  }
+
+  // If we have pointer->integer or integer->pointer, do ptrtoint or inttoptr.
+  if (Val->getType()->isPointerTy() && DstTy->isIntegerTy()) {
+    // Possibly adjust bit widths. Usually you want pointer width to match
+    // DstTy’s bit width. If they differ, you can do a trunc or extend.
+    unsigned PtrSize = DL.getPointerSizeInBits(
+        cast<PointerType>(Val->getType())->getAddressSpace());
+    // First cast pointer to an integer of pointer width
+    auto *PtrIntTy = IntegerType::get(DstTy->getContext(), PtrSize);
+    Value *Tmp = Builder.CreatePtrToInt(Val, PtrIntTy, "store.val.ptrtoint");
+    // Now coerce that integer to DstTy’s width if needed
+    return CoerceValToType(Builder, Tmp, DstTy, DL);
+  }
+  if (Val->getType()->isIntegerTy() && DstTy->isPointerTy()) {
+    // Similarly handle int->pointer:
+    unsigned PtrSize = DL.getPointerSizeInBits(
+        cast<PointerType>(DstTy)->getAddressSpace());
+    // Coerce int to pointer‐sized int
+    auto *PtrIntTy = IntegerType::get(DstTy->getContext(), PtrSize);
+    Value *Tmp = CoerceValToType(Builder, Val, PtrIntTy, DL);
+    return Builder.CreateIntToPtr(Tmp, DstTy, "store.val.inttoptr");
+  }
+
+  // If you get here, it’s some combination you haven’t handled.
+  llvm_unreachable("Unsupported type combination in CoerceValToType");
+}
+
   StoreInst *CreateAlignedStore(Value *Val, Value *Ptr, MaybeAlign Align,
                                 bool isVolatile = false) {
+    if (auto *PtrType = dyn_cast<PointerType>(Ptr->getType())) {
+      llvm::Type *ElemTy = PtrType->getElementType();
+      if (ElemTy != Val->getType()) {
+        // Use the more general helper to produce a correct cast or trunc/zext
+        const DataLayout &DL = BB->getModule()->getDataLayout();
+        Val = CoerceValToType(*this, Val, ElemTy, DL);
+        // ^ `*this` is an IRBuilder (assuming you are inside an IRBuilder
+        //   subclass). Or pass `Builder` if you have a separate builder object.
+      }
+    }
+
+    // Compute alignment if not provided
     if (!Align) {
       const DataLayout &DL = BB->getModule()->getDataLayout();
       Align = DL.getABITypeAlign(Val->getType());
     }
+
     return Insert(new StoreInst(Val, Ptr, isVolatile, *Align));
   }
+
   FenceInst *CreateFence(AtomicOrdering Ordering,
                          SyncScope::ID SSID = SyncScope::System,
                          const Twine &Name = "") {

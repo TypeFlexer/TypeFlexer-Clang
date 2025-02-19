@@ -98,6 +98,7 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "licm"
+#define DEBUG_SANITY_CHECK
 
 STATISTIC(NumCreatedBlocks, "Number of blocks created");
 STATISTIC(NumClonedBranches, "Number of branches cloned");
@@ -574,66 +575,6 @@ bool isIncrementingLoop(llvm::ICmpInst *ICmp) {
     LLVM_DEBUG(llvm::dbgs() << "Loop is incrementing or cannot be determined as decrementing.\n");
     return true;
 }
-static llvm::Instruction* FindDominatingICmpUsingPHI(llvm::Instruction *Inst, llvm::CallInst *CallInst, llvm::DominatorTree *DT) {
-    // Check if Inst is a PHI node
-    if (llvm::PHINode *PhiNode = llvm::dyn_cast<llvm::PHINode>(Inst)) {
-        LLVM_DEBUG(llvm::dbgs() << "Instruction is a PHI node. Analyzing its uses...\n");
-
-        llvm::Instruction *FirstICmp = nullptr;
-        llvm::Instruction *DominatingICmp = nullptr;
-
-        // Get the basic block containing the call instruction
-        llvm::BasicBlock *CurrentBB = CallInst->getParent();
-
-        // Vector to store all ICmp instructions using the PHI node
-        std::vector<llvm::ICmpInst*> ICmpUsers;
-
-        // Iterate through all users of the PHI node and collect ICmp instructions
-        for (auto *User : PhiNode->users()) {
-            // Check if the user is an ICmp instruction
-            if (llvm::ICmpInst *ICmp = llvm::dyn_cast<llvm::ICmpInst>(User)) {
-                LLVM_DEBUG(llvm::dbgs() << "Found ICmp instruction using the PHI node: " << *ICmp << "\n");
-
-                // Save the first ICmp instruction encountered
-                if (!FirstICmp) {
-                    FirstICmp = ICmp;
-                }
-
-                // Add the ICmp to the list
-                ICmpUsers.push_back(ICmp);
-            }
-        }
-
-        // Now, check dominance relationships between each ICmp and the call instruction
-        for (auto *ICmp : ICmpUsers) {
-            // Check if this ICmp dominates the call instruction's block
-            if (DT->dominates(ICmp, CallInst)) {
-                LLVM_DEBUG(llvm::dbgs() << "ICmp dominates the call instruction.\n");
-
-                // If we already have a dominating ICmp, check which one dominates closer to the current location
-                if (!DominatingICmp || DT->dominates(DominatingICmp, ICmp)) {
-                    DominatingICmp = ICmp;
-                }
-            }
-        }
-
-        // If no dominating ICmp is found, return the first ICmp encountered
-        if (DominatingICmp) {
-            LLVM_DEBUG(llvm::dbgs() << "Returning dominating ICmp instruction: " << *DominatingICmp << "\n");
-            return DominatingICmp;
-        } else if (FirstICmp) {
-            LLVM_DEBUG(llvm::dbgs() << "No dominating ICmp found. Returning the first ICmp: " << *FirstICmp << "\n");
-            return FirstICmp;
-        } else {
-            LLVM_DEBUG(llvm::dbgs() << "No ICmp instruction found using the PHI node.\n");
-            return nullptr;
-        }
-    }
-
-    LLVM_DEBUG(llvm::dbgs() << "Instruction is not a PHI node.\n");
-    return nullptr;
-}
-
 static llvm::BasicBlock* CheckLatchBlockConditions(llvm::BasicBlock *LatchBlock) {
     // Skip if the LatchBlock's name starts with "while"
     if (LatchBlock->getName().startswith("while")) {
@@ -1548,6 +1489,26 @@ void BeautifyAndPrintOptimizationDetails(Function *CurFn,
     }
 }
 
+// New helper function to print success details in a beautiful manner.
+void BeautifyAndPrintOptimizationSuccess(Function *CurFn,
+                                           Instruction *OriginalCall,
+                                           Value *OptimizedAddress,
+                                           Value *OptimizedScaledMaxIndex,
+                                           BasicBlock *OptimalPreheader,
+                                           int8_t sbx_type) {
+  llvm::outs() << "\n======================================================\n";
+  llvm::outs() << "Optimization SUCCESS in function: " << CurFn->getName() << "\n";
+  llvm::outs() << "Original VerifyAddrCall: " << *OriginalCall << "\n";
+  llvm::outs() << "Duplicated Address: " << *OptimizedAddress << "\n";
+  llvm::outs() << "Computed ScaledMaxIndex: " << *OptimizedScaledMaxIndex << "\n";
+  llvm::outs() << "Inserted into Preheader: " << OptimalPreheader->getName() << "\n";
+  if (sbx_type == 1)
+    llvm::outs() << "Verification Type: Wasm Pointer Verification\n";
+  else if (sbx_type == 2)
+    llvm::outs() << "Verification Type: Heap Pointer Verification\n";
+  llvm::outs() << "======================================================\n\n";
+}
+
 /// Hoist expressions out of the specified loop. Note, alias info for inner
 /// loop is not preserved so it is not a good idea to run LICM multiple
 /// times on one loop.
@@ -1616,7 +1577,7 @@ bool LoopInvariantCodeMotion::runOnLoop(
         LoopBoundPhiNode = getLoopBound(IncBlock, L);
 
         if (!isa<SCEVCouldNotCompute>(LoopBoundSCEV)) {
-            Value *CallIndVar = CallIndVar = VerifyAddrCall->getOperand(1);
+            Value *CallIndVar = VerifyAddrCall->getOperand(1);
             std::vector<PHINode *> CallIndVarPhi = FindPhiNodesUpwards(CallIndVar);
 
             // Get the first argument of the original call
@@ -1629,12 +1590,14 @@ bool LoopInvariantCodeMotion::runOnLoop(
 
             // Call the getMaxRangesUsingLVI function
             std::vector<PHINode *> CallIndVarPhis = FindPhiNodesUpwards(CallIndVar);
-            auto MaxRanges = getMaxRangesUsingLVI(PhiNodes, LVI, VerifyAddrCall,L, OptimalPreheader,
+            auto MaxRanges = getMaxRangesUsingLVI(PhiNodes, LVI, VerifyAddrCall, L, OptimalPreheader,
                                                   DT, static_cast<CallInst *>(VerifyAddrCall));
 
+            // If max-range info is incomplete, fall back to using the original call's arguments.
             if (MaxRanges.size() < CallIndVarPhis.size()) {
-#ifndef DEBUG_SANITY_CHECK
+#ifdef DEBUG_SANITY_CHECK
                 BeautifyAndPrintOptimizationDetails(CurFn, VerifyAddrCall, CallIndVarPhis, MaxRanges);
+#endif
                 CallInst *callInt = dyn_cast<CallInst>(VerifyAddrCall);
                 Value *Arg0 = callInt->getArgOperand(0);
                 Value *Arg1 = callInt->getArgOperand(1);
@@ -1642,50 +1605,43 @@ bool LoopInvariantCodeMotion::runOnLoop(
 
                 auto CurBB = VerifyAddrCall->getParent();
                 if (sbx_type == 1)
-                    Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB,
-                                                        Arg0, Arg1, VerifyAddrCall);
+                    Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB, Arg0, Arg1, VerifyAddrCall);
                 else if (sbx_type == 2)
-                    Builder.Verify_heap_ptr_within_loop(CurBB->getModule(), CurBB,
-                                                        Arg0, Arg1, VerifyAddrCall);
-                // Remove the original VerifyAddrCall from the for.body block
+                    Builder.Verify_heap_ptr_within_loop(CurBB->getModule(), CurBB, Arg0, Arg1, VerifyAddrCall);
+
+#ifdef DEBUG_SANITY_CHECK
+                // Use the original operands for the success message.
+                BeautifyAndPrintOptimizationSuccess(CurFn, VerifyAddrCall, Arg0, Arg1, OptimalPreheader, sbx_type);
+#endif
                 VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
                 eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
                 VerifyAddrCall = nullptr;
-#endif
                 continue;
             }
 
+            // Duplicate the address if it is defined inside the loop.
             Value *Address = VerifyAddrCall->getOperand(0);
-
-            // Check if Address needs to be duplicated outside the loop
+            Value *OptimizedAddress = Address; // default is the original address
             if (Instruction *AddrInst = dyn_cast<Instruction>(Address)) {
                 if (L->contains(AddrInst)) {
-                    // Duplicate the address-related instructions outside the loop
-                    llvm::Value *DuplicatedAddress = DuplicateInstructionsOutsideLoop(Address, Builder, L,
-                                                                                      OptimalPreheader, DT);
-                    Address = DuplicatedAddress;
+                    OptimizedAddress = DuplicateInstructionsOutsideLoop(Address, Builder, L, OptimalPreheader, DT);
+                    Address = OptimizedAddress; // update Address with the duplicated value
                 }
             }
 
             llvm::Value *NewIndexExpr = CallIndVar;
-            if (CheckForCallInstInDependencies(
-                    CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE))
-            {
-                NewIndexExpr = DuplicateInstructionsOutsideLoopWithMaxRanges(
-                        CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE);
-            }
+            if (CheckForCallInstInDependencies(CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE))
+                NewIndexExpr = DuplicateInstructionsOutsideLoopWithMaxRanges(CallIndVar, L, OptimalPreheader,
+                                                                             DT, MaxRanges, LVI, CurFn, SE);
 
-            // If LoopBound is of type i32, zero-extend it to i64
-            if (NewIndexExpr->getType()->isIntegerTy(32)) {
+            // If the index is i32, extend it to i64.
+            if (NewIndexExpr->getType()->isIntegerTy(32))
                 NewIndexExpr = Builder.CreateSExt(NewIndexExpr, Builder.getInt64Ty(), "loopbound.zext");
-            }
-            Instruction *LastInstInPreheader = OptimalPreheader->getTerminator();
-
 
             if (!isAvailableInBlock(OptimalPreheader, NewIndexExpr, DT))
                 continue;
 
-            // Compute ScaledMaxIndex = MaxIndex * strideLength
+            // Compute ScaledMaxIndex = strideLength * NewIndexExpr
             llvm::Value *ScaledMaxIndex = Builder.CreateMul(NewIndexExpr, strideLength, "ScaledMaxIndex");
 
             if (sbx_type == 1)
@@ -1693,6 +1649,9 @@ bool LoopInvariantCodeMotion::runOnLoop(
             else if (sbx_type == 2)
                 Builder.Verify_heap_ptr_no_optimization(OptimalPreheader->getModule(), Address, ScaledMaxIndex);
 
+#ifdef DEBUG_SANITY_CHECK
+            BeautifyAndPrintOptimizationSuccess(CurFn, VerifyAddrCall, OptimizedAddress, ScaledMaxIndex, OptimalPreheader, sbx_type);
+#endif
             VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
             // Remove the original VerifyAddrCall from the for.body block
             eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
@@ -1702,78 +1661,57 @@ bool LoopInvariantCodeMotion::runOnLoop(
             Value *CallIndVar = nullptr;
             // Check if VerifyAddrCall is valid and has at least one operand
             if (VerifyAddrCall && VerifyAddrCall->getNumOperands() > 0) {
-                // Safely access the first operand
-                CallIndVar = VerifyAddrCall->getOperand(0);
-
-                // If there is more than one operand, access the second one
-                if (VerifyAddrCall->getNumOperands() > 1) {
-                    CallIndVar = VerifyAddrCall->getOperand(1);
-                }
-
-                // Proceed with the rest of the code, using CallIndVar...
+                // Use the second operand if available; otherwise, the first.
+                CallIndVar = VerifyAddrCall->getOperand((VerifyAddrCall->getNumOperands() > 1) ? 1 : 0);
             } else {
                 llvm::errs() << "Error: VerifyAddrCall is null or has no operands.\n";
                 continue;
             }
 
             std::vector<PHINode *> CallIndVarPhis = FindPhiNodesUpwards(CallIndVar);
-            std::map<PHINode *, Value *>  MaxRanges = getMaxRangesUsingLVI(CallIndVarPhis, LVI, VerifyAddrCall,L,
+            std::map<PHINode *, Value *> MaxRanges = getMaxRangesUsingLVI(CallIndVarPhis, LVI, VerifyAddrCall, L,
                                                                            OptimalPreheader, DT,
                                                                            static_cast<CallInst *>(VerifyAddrCall));
             IRBuilder<> Builder(OptimalPreheader->getTerminator());
 
             if (MaxRanges.size() < CallIndVarPhis.size()) {
-#ifndef DEBUG_SANITY_CHECK
+#ifdef DEBUG_SANITY_CHECK
                 BeautifyAndPrintOptimizationDetails(CurFn, VerifyAddrCall, CallIndVarPhis, MaxRanges);
+#endif
                 CallInst *callInt = dyn_cast<CallInst>(VerifyAddrCall);
                 Value *Arg0 = callInt->getArgOperand(0);
                 Value *Arg1 = callInt->getArgOperand(1);
 
-
                 auto CurBB = VerifyAddrCall->getParent();
                 if (sbx_type == 1)
-                    Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB,
-                                                    Arg0, Arg1, VerifyAddrCall);
+                    Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB, Arg0, Arg1, VerifyAddrCall);
                 else if (sbx_type == 2)
-                    Builder.Verify_heap_ptr_within_loop(CurBB->getModule(), CurBB,
-                                                        Arg0, Arg1, VerifyAddrCall);
-                // Remove the original VerifyAddrCall from the for.body block
+                    Builder.Verify_heap_ptr_within_loop(CurBB->getModule(), CurBB, Arg0, Arg1, VerifyAddrCall);
+
+#ifdef DEBUG_SANITY_CHECK
+                BeautifyAndPrintOptimizationSuccess(CurFn, VerifyAddrCall, Arg0, Arg1, OptimalPreheader, sbx_type);
+#endif
                 VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
                 eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
                 VerifyAddrCall = nullptr;
-#endif
                 continue;
             }
 
             llvm::Value *NewIndexExpr = CallIndVar;
-            if (CheckForCallInstInDependencies(
-                    CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE))
-            {
-                NewIndexExpr = DuplicateInstructionsOutsideLoopWithMaxRanges(
-                        CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE);
-            }
+            if (CheckForCallInstInDependencies(CallIndVar, L, OptimalPreheader, DT, MaxRanges, LVI, CurFn, SE))
+                NewIndexExpr = DuplicateInstructionsOutsideLoopWithMaxRanges(CallIndVar, L, OptimalPreheader,
+                                                                             DT, MaxRanges, LVI, CurFn, SE);
 
-            if (!dyn_cast<Instruction>(NewIndexExpr))
-            {
-#ifndef DEBUG_SANITY_CHECK
-                BeautifyAndPrintOptimizationDetails(CurFn, VerifyAddrCall, CallIndVarPhis, MaxRanges);
+            if (!dyn_cast<Instruction>(NewIndexExpr)) {
+#ifdef DEBUG_SANITY_CHECK
                 CallInst *callInt = dyn_cast<CallInst>(VerifyAddrCall);
                 Value *Arg0 = callInt->getArgOperand(0);
                 Value *Arg1 = callInt->getArgOperand(1);
-
-
-                auto CurBB = VerifyAddrCall->getParent();
-                if (sbx_type == 1)
-                    Builder.Verify_Wasm_ptr_within_loop(CurBB->getModule(), CurBB,
-                                                    Arg0, Arg1, VerifyAddrCall);
-                else if (sbx_type == 2)
-                    Builder.Verify_heap_ptr_within_loop(CurBB->getModule(), CurBB,
-                                                        Arg0, Arg1, VerifyAddrCall);
-                // Remove the original VerifyAddrCall from the for.body block
+                BeautifyAndPrintOptimizationSuccess(CurFn, VerifyAddrCall, Arg0, Arg1, OptimalPreheader, sbx_type);
+#endif
                 VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
                 eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
                 VerifyAddrCall = nullptr;
-#endif
                 continue;
             }
 
@@ -1784,10 +1722,8 @@ bool LoopInvariantCodeMotion::runOnLoop(
 
             // Get the first argument of the original call
             Value *Address = VerifyAddrCall->getOperand(0);
-            llvm::Value *MaxRangeIndexSubexpression = nullptr;
-            // Duplicate the index subexpression with max ranges
-            MaxRangeIndexSubexpression = NewIndexExpr;
-            Value* LoopBound = MaxRangeIndexSubexpression; //loop bound is now the consolidate subexpression
+            llvm::Value *MaxRangeIndexSubexpression = NewIndexExpr; // use NewIndexExpr as the subexpression
+            Value *LoopBound = MaxRangeIndexSubexpression; // consolidated loop bound
 
             // Safely cast Address to llvm::Instruction
             llvm::Instruction *AddrInst = dyn_cast<llvm::Instruction>(Address);
@@ -1796,30 +1732,24 @@ bool LoopInvariantCodeMotion::runOnLoop(
                 continue;
             }
 
-            if (llvm::Instruction *LoopBoundInst = llvm::dyn_cast<llvm::Instruction>(LoopBound)) {
+            if (llvm::Instruction *LoopBoundInst = dyn_cast<llvm::Instruction>(LoopBound)) {
                 LLVM_DEBUG(dbgs() << "Checking the location of LoopBound: " << *LoopBoundInst << "\n");
 
                 // Check if LoopBound is already contained within the preheader block
                 if (LoopBoundInst->getParent() == OptimalPreheader) {
                     LLVM_DEBUG(dbgs() << "LoopBound is already contained in the OptimalPreheader: "
                                       << OptimalPreheader->getName() << "\n");
-                }
-                    // Otherwise, check if LoopBound dominates the preheader
-                else if (DT->dominates(LoopBoundInst, OptimalPreheader->getTerminator())) {
-                    LLVM_DEBUG(dbgs() << "LoopBound dominates the preheader block: "
-                                      << OptimalPreheader->getName() << "\n");
-                }
-                    // If neither condition is met, handle it appropriately
-                else {
+                } else if (DT->dominates(LoopBoundInst, OptimalPreheader->getTerminator())) {
+                    LLVM_DEBUG(dbgs() << "LoopBound dominates the preheader block: " << OptimalPreheader->getName() << "\n");
+                } else {
                     LLVM_DEBUG(dbgs() << "LoopBound neither dominates nor is contained in the preheader.\n"
                                       << "LoopBound location: " << LoopBoundInst->getParent()->getName()
                                       << "\nOptimalPreheader: " << OptimalPreheader->getName() << "\n");
-                    continue;  // Handle the situation or return depending on your logic
+                    continue;
                 }
             }
 
-            // Proceed with AddrInst...
-            // Duplicating the instruction or performing other actions
+            // Duplicate Address outside the loop.
             llvm::Value *DuplicatedAddress = DuplicateInstructionsOutsideLoop(AddrInst, Builder, L,
                                                                               OptimalPreheader, DT);
 
@@ -1828,7 +1758,7 @@ bool LoopInvariantCodeMotion::runOnLoop(
                 continue;
             }
 
-            // If LoopBound is a pointer, load the value it points to and handle it accordingly
+            // If LoopBound is a pointer, load and/or extend it.
             Instruction *LoadedVal = nullptr;
 
             if (LoopBound->getType()->isPointerTy()) {
@@ -1837,8 +1767,7 @@ bool LoopInvariantCodeMotion::runOnLoop(
                 if (PointedType->isIntegerTy(32)) {
                     // Load as i32 and zero extend to i64
                     LoadedVal = Builder.CreateLoad(PointedType, LoopBound, "loaded.loopbound");
-                    LoopBound = Builder.CreateSExt(LoadedVal, Builder.getInt64Ty(),
-                                                              "zext.loopbound");
+                    LoopBound = Builder.CreateSExt(LoadedVal, Builder.getInt64Ty(), "zext.loopbound");
                 } else if (PointedType->isIntegerTy(64)) {
                     // Load as i64 directly
                     LoadedVal = Builder.CreateLoad(PointedType, LoopBound, "loaded.loopbound");
@@ -1853,13 +1782,12 @@ bool LoopInvariantCodeMotion::runOnLoop(
                 llvm::Value *ScaledMaxIndex = Builder.CreateMul(LoopBound, strideLength, "ScaledMaxIndex");
 
                 if (sbx_type == 1)
-                    Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(),
-                                        DuplicatedAddress,
-                                        ScaledMaxIndex);
+                    Builder.Verify_Wasm_ptr(OptimalPreheader->getModule(), DuplicatedAddress, ScaledMaxIndex);
                 else if (sbx_type == 2)
-                    Builder.Verify_heap_ptr_no_optimization(OptimalPreheader->getModule(),
-                                                            DuplicatedAddress,
-                                                            ScaledMaxIndex);
+                    Builder.Verify_heap_ptr_no_optimization(OptimalPreheader->getModule(), DuplicatedAddress, ScaledMaxIndex);
+#ifdef DEBUG_SANITY_CHECK
+                BeautifyAndPrintOptimizationSuccess(CurFn, VerifyAddrCall, DuplicatedAddress, ScaledMaxIndex, OptimalPreheader, sbx_type);
+#endif
                 VerifyAddrCall->replaceAllUsesWith(UndefValue::get(VerifyAddrCall->getType()));
                 eraseInstruction(*VerifyAddrCall, SafetyInfo, CurAST.get(), MSSAU.get());
 
