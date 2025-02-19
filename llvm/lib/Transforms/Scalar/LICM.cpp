@@ -372,32 +372,38 @@ llvm::SinkAndHoistLICMFlags::SinkAndHoistLICMFlags(
         }
       }
 }
+
 // Function to recursively duplicate instructions outside the loop
-llvm::Value* DuplicateInstructionsOutsideLoop(
-        llvm::Value *V,
-        llvm::IRBuilder<> &Builder,
-        llvm::Loop *L,
-        llvm::BasicBlock *Preheader,
-        llvm::DominatorTree *DT) {
+// New helper that carries a visited set
+llvm::Value* DuplicateInstructionsOutsideLoopImpl(
+    llvm::Value *V,
+    llvm::IRBuilder<> &Builder,
+    llvm::Loop *L,
+    llvm::BasicBlock *Preheader,
+    llvm::DominatorTree *DT,
+    llvm::SmallPtrSetImpl<llvm::Value*> &Visited) {
 
-    LLVM_DEBUG(llvm::dbgs() << "Attempting to duplicate instruction: " << *V << "\n");
+    // If we have seen V before, return it to break any cycles.
+    if (!Visited.insert(V).second)
+        return V;
 
-    if (llvm::Instruction *Inst = dyn_cast<llvm::Instruction>(V)) {
+    LLVM_DEBUG(llvm::dbgs() << "Processing value: " << *V << "\n");
+
+    if (llvm::Instruction *Inst = llvm::dyn_cast<llvm::Instruction>(V)) {
         LLVM_DEBUG(llvm::dbgs() << "Found instruction: " << *Inst << "\n");
 
-        // Handle PHI nodes: take one of the incoming paths
-        if (llvm::PHINode *Phi = dyn_cast<llvm::PHINode>(Inst)) {
-            // Take one incoming value (you might choose the first one, for simplicity)
+        // Handle PHI nodes: take one incoming value (for simplicity, choose the first one)
+        if (llvm::PHINode *Phi = llvm::dyn_cast<llvm::PHINode>(Inst)) {
             llvm::Value *IncomingValue = Phi->getIncomingValue(0);
             LLVM_DEBUG(llvm::dbgs() << "Taking incoming value from PHI node: " << *IncomingValue << "\n");
-            return DuplicateInstructionsOutsideLoop(IncomingValue, Builder, L, Preheader, DT);
+            return DuplicateInstructionsOutsideLoopImpl(IncomingValue, Builder, L, Preheader, DT, Visited);
         }
 
         // Check if it's a load instruction
-        if (llvm::LoadInst *Load = dyn_cast<llvm::LoadInst>(Inst)) {
+        if (llvm::LoadInst *Load = llvm::dyn_cast<llvm::LoadInst>(Inst)) {
             // If the load instruction is loading from a global variable, duplicate it and stop
-            if (llvm::GlobalVariable *GV = dyn_cast<llvm::GlobalVariable>(Load->getPointerOperand())) {
-                llvm::Instruction *NewLoad = Load->clone();
+            if (llvm::GlobalVariable *GV = llvm::dyn_cast<llvm::GlobalVariable>(Load->getPointerOperand())) {
+                llvm::Instruction *NewLoad = llvm::cast<llvm::LoadInst>(Load->clone());
                 Builder.Insert(NewLoad);
                 LLVM_DEBUG(llvm::dbgs() << "Duplicated load instruction: " << *NewLoad << "\n");
                 return NewLoad;
@@ -422,7 +428,7 @@ llvm::Value* DuplicateInstructionsOutsideLoop(
 
             for (llvm::Value *Operand : Operands) {
                 LLVM_DEBUG(llvm::dbgs() << "Duplicating operand: " << *Operand << "\n");
-                NewOperands.push_back(DuplicateInstructionsOutsideLoop(Operand, Builder, L, Preheader, DT));
+                NewOperands.push_back(DuplicateInstructionsOutsideLoopImpl(Operand, Builder, L, Preheader, DT, Visited));
             }
 
             // Create the new instruction using the duplicated operands
@@ -442,6 +448,19 @@ llvm::Value* DuplicateInstructionsOutsideLoop(
     LLVM_DEBUG(llvm::dbgs() << "Returning original value: " << *V << "\n");
     return V;  // If it's not an instruction or already dominates the preheader, return it as is
 }
+
+// The original function now just creates a fresh visited set and calls the helper.
+llvm::Value* DuplicateInstructionsOutsideLoop(
+    llvm::Value *V,
+    llvm::IRBuilder<> &Builder,
+    llvm::Loop *L,
+    llvm::BasicBlock *Preheader,
+    llvm::DominatorTree *DT) {
+
+    llvm::SmallPtrSet<llvm::Value*, 8> Visited;
+    return DuplicateInstructionsOutsideLoopImpl(V, Builder, L, Preheader, DT, Visited);
+}
+
 
 
 llvm::Value* TraverseUpToPHINode(llvm::Value *Op, llvm::BasicBlock *CurrentBB) {

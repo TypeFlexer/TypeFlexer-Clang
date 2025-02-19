@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Set compiler flags (Ensure consistency with Hoard)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -static")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -static")
 
 # Add the subdirectory where Hoard's CMakeLists.txt is located
 add_subdirectory(Hoard/src)
